@@ -1,4 +1,4 @@
-﻿name: tests
+name: tests
 
 on:
   push:
@@ -9,7 +9,10 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest\n    env:\n      ULTRA_RAG_KEY_PROTECTOR: file-dev\n      ULTRA_RAG_ALLOW_INSECURE_KEYSTORE: "1"
+    runs-on: ubuntu-latest
+    env:
+      ULTRA_RAG_KEY_PROTECTOR: file-dev
+      ULTRA_RAG_ALLOW_INSECURE_KEYSTORE: "1"
     strategy:
       fail-fast: false
       matrix:
