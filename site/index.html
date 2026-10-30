@@ -1,10 +1,10 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="ja">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ultra-RAG — 自分のPCで動く記憶とキー保管庫</title>
-<meta name="description" content="ultra-RAGは、dshのためのローカル優先の記憶・キー保管庫です。サーバーなしで自分のPCだけで動きます。">
+<title>ultra-RAG 窶・閾ｪ蛻・・PC縺ｧ蜍輔￥險俶・縺ｨ繧ｭ繝ｼ菫晉ｮ｡蠎ｫ</title>
+<meta name="description" content="ultra-RAG縺ｯ縲‥sh縺ｮ縺溘ａ縺ｮ繝ｭ繝ｼ繧ｫ繝ｫ蜆ｪ蜈医・險俶・繝ｻ繧ｭ繝ｼ菫晉ｮ｡蠎ｫ縺ｧ縺吶ゅし繝ｼ繝舌・縺ｪ縺励〒閾ｪ蛻・・PC縺縺代〒蜍輔″縺ｾ縺吶・>
 <style>
 :root {
   color-scheme: dark;
@@ -48,23 +48,22 @@ footer { border-top: 1px solid var(--line); margin-top: 40px; padding-top: 18px;
 <header>
   <div class="badge">local-first / experimental</div>
   <h1>ultra-RAG</h1>
-  <p class="lead">dshのための、自分のPCで動く記憶とキー保管庫。知識を蓄え、必要なときだけ取り出し、秘密値は選択した子プロセスだけに渡します。</p>
+  <p class="lead">dsh縺ｮ縺溘ａ縺ｮ縲∬・蛻・・PC縺ｧ蜍輔￥險俶・縺ｨ繧ｭ繝ｼ菫晉ｮ｡蠎ｫ縲ら衍隴倥ｒ闢・∴縲∝ｿ・ｦ√↑縺ｨ縺阪□縺大叙繧雁・縺励∫ｧ伜ｯ・､縺ｯ驕ｸ謚槭＠縺溷ｭ舌・繝ｭ繧ｻ繧ｹ縺縺代↓貂｡縺励∪縺吶・/p>
 </header>
 
 <div class="callout">
-  <strong>サーバーは必須ではありません。</strong>
-  公開版の基本構成はPC単体で完結します。データはローカルのアプリケーションデータ領域に保存され、ホームサーバー同期は任意です。
-</div>
+  <strong>繧ｵ繝ｼ繝舌・縺ｯ蠢・医〒縺ｯ縺ゅｊ縺ｾ縺帙ｓ縲・/strong>
+  蜈ｬ髢狗沿縺ｮ蝓ｺ譛ｬ讒区・縺ｯPC蜊倅ｽ薙〒螳檎ｵ舌＠縺ｾ縺吶ゅョ繝ｼ繧ｿ縺ｯ繝ｭ繝ｼ繧ｫ繝ｫ縺ｮ繧｢繝励Μ繧ｱ繝ｼ繧ｷ繝ｧ繝ｳ繝・・繧ｿ鬆伜沺縺ｫ菫晏ｭ倥＆繧後√・繝ｼ繝繧ｵ繝ｼ繝舌・蜷梧悄縺ｯ莉ｻ諢上〒縺吶・</div>
 
-<h2>できること</h2>
+<h2>縺ｧ縺阪ｋ縺薙→</h2>
 <div class="grid">
-  <div class="card"><h3>知識の記憶</h3><p>原則・教訓・判断基準を保存。READMEや設計文書のコピーは保存しません。</p></div>
-  <div class="card"><h3>スコープ分離</h3><p>全案件共通、プロジェクト固有、セッション限定を分けて扱います。</p></div>
-  <div class="card"><h3>暗号化キー保管庫</h3><p>AES-GCM。WindowsはDPAPI、Linuxはsystemd-credsで保護します。</p></div>
-  <div class="card"><h3>MCP / dsh連携</h3><p>stdioのMCPサーバーとCordisプラグインで、記憶を文脈へ注入します。</p></div>
+  <div class="card"><h3>遏･隴倥・險俶・</h3><p>蜴溷援繝ｻ謨呵ｨ薙・蛻､譁ｭ蝓ｺ貅悶ｒ菫晏ｭ倥３EADME繧・ｨｭ險域枚譖ｸ縺ｮ繧ｳ繝斐・縺ｯ菫晏ｭ倥＠縺ｾ縺帙ｓ縲・/p></div>
+  <div class="card"><h3>繧ｹ繧ｳ繝ｼ繝怜・髮｢</h3><p>蜈ｨ譯井ｻｶ蜈ｱ騾壹√・繝ｭ繧ｸ繧ｧ繧ｯ繝亥崋譛峨√そ繝・す繝ｧ繝ｳ髯仙ｮ壹ｒ蛻・￠縺ｦ謇ｱ縺・∪縺吶・/p></div>
+  <div class="card"><h3>證怜捷蛹悶く繝ｼ菫晉ｮ｡蠎ｫ</h3><p>AES-GCM縲８indows縺ｯDPAPI縲´inux縺ｯsystemd-creds縺ｧ菫晁ｭｷ縺励∪縺吶・/p></div>
+  <div class="card"><h3>MCP / dsh騾｣謳ｺ</h3><p>stdio縺ｮMCP繧ｵ繝ｼ繝舌・縺ｨCordis繝励Λ繧ｰ繧､繝ｳ縺ｧ縲∬ｨ俶・繧呈枚閼医∈豕ｨ蜈･縺励∪縺吶・/p></div>
 </div>
 
-<h2>インストール</h2>
+<h2>繧､繝ｳ繧ｹ繝医・繝ｫ</h2>
 <pre><code>git clone https://github.com/puyokura/ultra-rag.git
 cd ultra-rag
 python -m venv .venv
@@ -72,26 +71,26 @@ python -m venv .venv
 pip install -e .
 ultra-rag init</code></pre>
 
-<h2>使い方</h2>
-<pre><code>ultra-rag rag remember "実プロセスで検証する" --kind lesson --scope shared_lesson
-ultra-rag rag search "検証"
+<h2>菴ｿ縺・婿</h2>
+<pre><code>ultra-rag rag remember "螳溘・繝ｭ繧ｻ繧ｹ縺ｧ讀懆ｨｼ縺吶ｋ" --kind lesson --scope shared_lesson
+ultra-rag rag search "讀懆ｨｼ"
 ultra-rag secret add EXAMPLE_API_KEY --service example
 ultra-rag secret list
 ultra-rag secret exec --key &lt;KEY_ID&gt; --command "python -c \"import os; print(bool(os.environ.get('EXAMPLE_API_KEY')))\""</code></pre>
 
-<h2>設計上の約束</h2>
+<h2>險ｭ險井ｸ翫・邏・據</h2>
 <ul>
-  <li>秘密値は一覧・監査・モデルへ返さない。</li>
-  <li>値を渡したコマンドは値を読める。マスキングは誤出力の低減であり、外部送信を防がない。</li>
-  <li>HTTP APIはプライベートネットワークかTLSリバースプロキシの内側で使う。</li>
-  <li>文書の内容ではなく、再利用できる知識だけを記憶する。</li>
+  <li>遘伜ｯ・､縺ｯ荳隕ｧ繝ｻ逶｣譟ｻ繝ｻ繝｢繝・Ν縺ｸ霑斐＆縺ｪ縺・・/li>
+  <li>蛟､繧呈ｸ｡縺励◆繧ｳ繝槭Φ繝峨・蛟､繧定ｪｭ繧√ｋ縲ゅ・繧ｹ繧ｭ繝ｳ繧ｰ縺ｯ隱､蜃ｺ蜉帙・菴取ｸ帙〒縺ゅｊ縲∝､夜Κ騾∽ｿ｡繧帝亟縺後↑縺・・/li>
+  <li>HTTP API縺ｯ繝励Λ繧､繝吶・繝医ロ繝・ヨ繝ｯ繝ｼ繧ｯ縺亀LS繝ｪ繝舌・繧ｹ繝励Ο繧ｭ繧ｷ縺ｮ蜀・・縺ｧ菴ｿ縺・・/li>
+  <li>譁・嶌縺ｮ蜀・ｮｹ縺ｧ縺ｯ縺ｪ縺上∝・蛻ｩ逕ｨ縺ｧ縺阪ｋ遏･隴倥□縺代ｒ險俶・縺吶ｋ縲・/li>
 </ul>
 
-<h2>リンク</h2>
-<p><a href="https://github.com/puyokura/ultra-rag">GitHub repository</a> · <a href="https://github.com/puyokura/ultra-rag/blob/main/README.md">README</a> · <a href="https://github.com/puyokura/ultra-rag/blob/main/SECURITY.md">Security</a></p>
+<h2>繝ｪ繝ｳ繧ｯ</h2>
+<p><a href="https://github.com/puyokura/ultra-rag">GitHub repository</a> ﾂｷ <a href="https://github.com/puyokura/ultra-rag/blob/master/README.md">README</a> ﾂｷ <a href="https://github.com/puyokura/ultra-rag/blob/master/SECURITY.md">Security</a></p>
 
 <footer>
-  ultra-RAG · experimental · no hosted service · no telemetry
+  ultra-RAG ﾂｷ experimental ﾂｷ no hosted service ﾂｷ no telemetry
 </footer>
 </main>
 </body>
