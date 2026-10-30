@@ -1,4 +1,4 @@
-# ultra-RAG
+﻿# ultra-RAG
 
 Local-first memory and key vault for [DeepSeek Harness](https://github.com/deepseek-ai) (`dsh`).
 
@@ -8,16 +8,14 @@ ultra-RAG keeps reusable knowledge, session excerpts, encrypted API keys, and pa
 
 ## What it does
 
-- **Knowledge memory** — stores generalizable principles, lessons, and decisions; not copies of README or design documents.
-- **Scoped recall** — universal memories, project-only memories, and session notes are kept separate.
-- **Encrypted key vault** — AES-GCM values with Windows DPAPI or Linux `systemd-creds` protection; values are supplied only to a selected child process.
-- **Password handoff** — one-shot sudo/SSH password input without writing the password to disk.
-- **MCP server** — exposes memory and key tools to dsh over stdio.
-- **Optional server sync** — a home server can be authoritative, while a PC keeps a replica and an unsynced queue.
+- **Knowledge memory** 窶・stores generalizable principles, lessons, and decisions; not copies of README or design documents.
+- **Scoped recall** 窶・universal memories, project-only memories, and session notes are kept separate.
+- **Encrypted key vault** 窶・AES-GCM values with Windows DPAPI or Linux `systemd-creds` protection; values are supplied only to a selected child process.
+- **Password handoff** 窶・one-shot sudo/SSH password input without writing the password to disk.
+- **MCP server** 窶・exposes memory and key tools to dsh over stdio.
+- **Optional server sync** 窶・a home server can be authoritative, while a PC keeps a replica and an unsynced queue.
 
 The public build does **not** include a hosted service, telemetry, or a shared cloud database. Your data stays in your local application-data directory unless you explicitly configure sync.
-
-Project page: https://puyokura.cloudfree.jp/ultra-rag/
 
 ## Single-PC mode
 
