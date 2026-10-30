@@ -1,0 +1,20 @@
+[Unit]
+Description=ultra-RAG key-supplied service (example)
+After=network.target
+
+[Service]
+# Run as a non-administrator user. key_exec/keyrun refuse an elevated token.
+Type=simple
+User=appuser
+Group=appuser
+# Do not put key values in this unit or in an EnvironmentFile. The launcher
+# obtains the selected ids from the vault and supplies only their values to
+# this command's environment for its lifetime.
+ExecStart=/usr/bin/python3 -m secret_core.keyrun --home %h/.local/share/ultra-rag --key key_0123456789abcdef0123456789abcdef -- /usr/local/bin/example-service
+Restart=on-failure
+RestartSec=5
+# The launcher is the foreground process; systemd owns start/stop/restart.
+KillMode=control-group
+
+[Install]
+WantedBy=multi-user.target

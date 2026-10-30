@@ -1,0 +1,39 @@
+# ultra-RAG monorepo: shared contracts and feature projects.
+# Dev usage does not require installation: bin/ultra-rag sets PYTHONPATH.
+# This mapping exists so `pip install -e .` produces the same import names.
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ultra-rag"
+version = "0.1.0"
+description = "Personal memory, session notes, and authentication assistance for DeepSeek Harness"
+requires-python = ">=3.11"
+dependencies = [
+  "cryptography>=42",
+  "filelock>=3.12",
+  "PyYAML>=6",
+  "zstandard>=0.22",
+  "mcp>=1.0,<2",
+]
+
+[project.scripts]
+ultra-rag = "ultra_rag_cli.main:main"
+
+[tool.setuptools]
+packages = [
+  "contracts",
+  "rag",
+  "secret_core",
+  "key_use",
+  "password_input",
+  "ultra_rag_cli",
+]
+
+[tool.setuptools.package-dir]
+secret_core = "secret-core/secret_core"
+key_use = "key-use/key_use"
+password_input = "password-input/password_input"
+ultra_rag_cli = "cli/ultra_rag_cli"

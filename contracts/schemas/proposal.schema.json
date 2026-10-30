@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ultra-rag.local/contracts/proposal.schema.json",
+  "title": "MemoryProposal",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["op", "base_revision", "device_id", "update_id"],
+  "properties": {
+    "op": {"enum": ["create", "update", "forget", "delete", "confirm"]},
+    "update_id": {"type": "string", "pattern": "^upd_[A-Za-z0-9._-]+$"},
+    "base_revision": {"type": "integer", "minimum": 0},
+    "device_id": {"type": "string", "pattern": "^dev_[0-9a-f]{32}$"},
+    "session_id": {"type": ["string", "null"], "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"},
+    "target_id": {"type": ["string", "null"], "pattern": "^mem_[0-9a-f]{32}$"},
+    "target_revision": {"type": ["integer", "null"], "minimum": 0},
+    "kind": {"enum": ["philosophy", "design_principle", "preference", "prohibition", "requirement", "lesson", "project_decision", null]},
+    "scope": {"enum": ["personal", "shared_lesson", "project", "session", null]},
+    "project_id": {"type": ["string", "null"], "pattern": "^proj_[0-9a-f]{16}$"},
+    "statement": {"type": ["string", "null"]},
+    "conditions": {"type": "array", "items": {"type": "string"}},
+    "exceptions": {"type": "array", "items": {"type": "string"}},
+    "evidence_kind": {"enum": ["explicit_statement", "explicit_registration", "confirmed_inference", "direct_edit", "imported_statement", "extracted", null]},
+    "source_refs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "session_id": {"type": ["string", "null"]},
+          "message_id": {"type": ["string", "null"]},
+          "excerpt_id": {"type": ["string", "null"]},
+          "start": {"type": ["integer", "null"], "minimum": 0},
+          "end": {"type": ["integer", "null"], "minimum": 0},
+          "note": {"type": ["string", "null"]}
+        }
+      }
+    },
+    "intent": {"type": ["string", "null"]},
+    "confirm": {"type": "boolean"},
+    "note": {"enum": ["adopt", "reject", null]}
+  }
+}

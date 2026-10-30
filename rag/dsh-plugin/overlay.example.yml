@@ -1,0 +1,27 @@
+# dsh overlay for ultra-RAG (example)
+#
+# This file is a dsh `--patch` layer. It does not modify the existing profile.
+# Replace <REPO> with the absolute repository path and <HOME> with the
+# ultra-RAG home created by `ultra-rag init` (both may use forward slashes on
+# Windows). Then boot with:
+#
+#   dsh --profile <profile> --patch <this-file>
+#
+# The memory bridge injects confirmed context before model requests and records
+# completed turns. The MCP entry exposes memory and key tools to the model; the
+# key tools never return a stored value.
+- insert:
+    - id: ultra-rag-memory
+      name: <REPO>/rag/dsh-plugin/index.mjs
+      config:
+        home: <HOME>
+    - id: mcp-ultra-rag
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: ultra-rag
+        transport: stdio
+        command: python
+        args:
+          - <REPO>/scripts/run_mcp.py
+          - --home
+          - <HOME>

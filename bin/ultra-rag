@@ -1,0 +1,5 @@
+#!/bin/sh
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+PYTHONPATH="$ROOT:$ROOT/secret-core:$ROOT/key-use:$ROOT/password-input:$ROOT/cli:${PYTHONPATH:-}"
+export PYTHONPATH
+exec python3 -m ultra_rag_cli.main "$@"

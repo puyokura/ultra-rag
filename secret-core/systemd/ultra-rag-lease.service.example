@@ -1,0 +1,15 @@
+[Unit]
+Description=ultra-RAG permission lease refresher (example)
+After=default.target
+
+[Service]
+Type=simple
+# Run as the same non-administrator user that owns the vault.
+User=appuser
+Group=appuser
+ExecStart=/usr/bin/python3 -m secret_core.lease_daemon --home %h/.local/share/ultra-rag --interval 60
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

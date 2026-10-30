@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.tmp/
+*.egg-info/
+build/
+dist/
+.venv/
+# Runtime data is never committed. The real home is chosen by ULTRA_RAG_HOME.
+runtime/
+.env
+.env.public

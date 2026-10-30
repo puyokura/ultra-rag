@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ultra-RAG — 自分のPCで動く記憶とキー保管庫</title>
+<meta name="description" content="ultra-RAGは、dshのためのローカル優先の記憶・キー保管庫です。サーバーなしで自分のPCだけで動きます。">
+<style>
+:root {
+  color-scheme: dark;
+  --bg: #0d1117;
+  --panel: #161b22;
+  --line: #30363d;
+  --text: #e6edf3;
+  --muted: #8b949e;
+  --accent: #7ee787;
+  --link: #79c0ff;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 16px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans JP", sans-serif;
+}
+main { max-width: 860px; margin: 0 auto; padding: 56px 24px 72px; }
+header { border-bottom: 1px solid var(--line); padding-bottom: 28px; margin-bottom: 32px; }
+h1 { font-size: clamp(2rem, 6vw, 3.2rem); line-height: 1.1; margin: 0 0 12px; letter-spacing: -0.03em; }
+h2 { font-size: 1.15rem; margin: 36px 0 12px; }
+p { margin: 0 0 14px; }
+.lead { color: var(--muted); font-size: 1.08rem; max-width: 680px; }
+.badge { display: inline-block; border: 1px solid var(--line); border-radius: 999px; padding: 2px 10px; color: var(--accent); font-size: 0.78rem; margin-bottom: 16px; }
+.callout { background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--accent); padding: 16px 18px; margin: 24px 0; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+.card { background: var(--panel); border: 1px solid var(--line); padding: 16px; }
+.card h3 { margin: 0 0 6px; font-size: 0.98rem; }
+.card p { color: var(--muted); font-size: 0.9rem; margin: 0; }
+pre { background: #010409; border: 1px solid var(--line); padding: 14px 16px; overflow-x: auto; font-size: 0.86rem; line-height: 1.55; }
+code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+a { color: var(--link); }
+ul { padding-left: 1.2rem; }
+li { margin: 6px 0; }
+footer { border-top: 1px solid var(--line); margin-top: 40px; padding-top: 18px; color: var(--muted); font-size: 0.86rem; }
+</style>
+</head>
+<body>
+<main>
+<header>
+  <div class="badge">local-first / experimental</div>
+  <h1>ultra-RAG</h1>
+  <p class="lead">dshのための、自分のPCで動く記憶とキー保管庫。知識を蓄え、必要なときだけ取り出し、秘密値は選択した子プロセスだけに渡します。</p>
+</header>
+
+<div class="callout">
+  <strong>サーバーは必須ではありません。</strong>
+  公開版の基本構成はPC単体で完結します。データはローカルのアプリケーションデータ領域に保存され、ホームサーバー同期は任意です。
+</div>
+
+<h2>できること</h2>
+<div class="grid">
+  <div class="card"><h3>知識の記憶</h3><p>原則・教訓・判断基準を保存。READMEや設計文書のコピーは保存しません。</p></div>
+  <div class="card"><h3>スコープ分離</h3><p>全案件共通、プロジェクト固有、セッション限定を分けて扱います。</p></div>
+  <div class="card"><h3>暗号化キー保管庫</h3><p>AES-GCM。WindowsはDPAPI、Linuxはsystemd-credsで保護します。</p></div>
+  <div class="card"><h3>MCP / dsh連携</h3><p>stdioのMCPサーバーとCordisプラグインで、記憶を文脈へ注入します。</p></div>
+</div>
+
+<h2>インストール</h2>
+<pre><code>git clone https://github.com/puyokura/ultra-rag.git
+cd ultra-rag
+python -m venv .venv
+.venv\Scripts\activate   # Windows
+pip install -e .
+ultra-rag init</code></pre>
+
+<h2>使い方</h2>
+<pre><code>ultra-rag rag remember "実プロセスで検証する" --kind lesson --scope shared_lesson
+ultra-rag rag search "検証"
+ultra-rag secret add EXAMPLE_API_KEY --service example
+ultra-rag secret list
+ultra-rag secret exec --key &lt;KEY_ID&gt; --command "python -c \"import os; print(bool(os.environ.get('EXAMPLE_API_KEY')))\""</code></pre>
+
+<h2>設計上の約束</h2>
+<ul>
+  <li>秘密値は一覧・監査・モデルへ返さない。</li>
+  <li>値を渡したコマンドは値を読める。マスキングは誤出力の低減であり、外部送信を防がない。</li>
+  <li>HTTP APIはプライベートネットワークかTLSリバースプロキシの内側で使う。</li>
+  <li>文書の内容ではなく、再利用できる知識だけを記憶する。</li>
+</ul>
+
+<h2>リンク</h2>
+<p><a href="https://github.com/puyokura/ultra-rag">GitHub repository</a> · <a href="https://github.com/puyokura/ultra-rag/blob/main/README.md">README</a> · <a href="https://github.com/puyokura/ultra-rag/blob/main/SECURITY.md">Security</a></p>
+
+<footer>
+  ultra-RAG · experimental · no hosted service · no telemetry
+</footer>
+</main>
+</body>
+</html>

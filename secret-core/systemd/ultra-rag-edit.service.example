@@ -1,0 +1,24 @@
+[Unit]
+Description=ultra-RAG direct Markdown edit watcher
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=appuser
+Group=appuser
+Environment=ULTRA_RAG_HOME=%h/ultra-rag
+Environment=PYTHONIOENCODING=utf-8
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONPATH=<REPO>
+ExecStart=<REPO>/.venv/bin/python -m ultra_rag_cli.main --home %h/ultra-rag rag edit watch --interval 2 --export-first
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=%h/ultra-rag
+
+[Install]
+WantedBy=multi-user.target

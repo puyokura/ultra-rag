@@ -1,0 +1,24 @@
+[Unit]
+Description=ultra-RAG memory HTTP API (LAN only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=appuser
+Group=appuser
+Environment=ULTRA_RAG_HOME=%h/ultra-rag
+Environment=PYTHONIOENCODING=utf-8
+Environment=PYTHONDONTWRITEBYTECODE=1
+# Bind to one LAN address; never 0.0.0.0 for an internet-reachable host.
+ExecStart=<REPO>/.venv/bin/python -m ultra_rag_cli.main --home %h/ultra-rag rag serve --host <LAN_IP> --port 8765
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=%h/ultra-rag
+
+[Install]
+WantedBy=multi-user.target

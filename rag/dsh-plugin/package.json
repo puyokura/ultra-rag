@@ -1,0 +1,10 @@
+{
+  "name": "ultra-rag-dsh-plugin",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Cordis host plugin that injects ultra-RAG memory and records completed turns",
+  "peerDependencies": {
+    "@deepseek-ai/dsh-llm": "*"
+  }
+}
