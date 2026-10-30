@@ -17,6 +17,19 @@ ultra-RAG keeps reusable knowledge, session excerpts, encrypted API keys, and pa
 
 The public build does **not** include a hosted service, telemetry, or a shared cloud database. Your data stays in your local application-data directory unless you explicitly configure sync.
 
+Project page: https://puyokura.cloudfree.jp/ultra-rag/
+
+## Single-PC mode
+
+This is the default and recommended mode.
+
+- Run `ultra-rag init` on one PC.
+- Leave `sync_remote` unset.
+- Do not start `rag serve`, systemd services, or a reverse proxy.
+- Use `ULTRA_RAG_HOME` if you want the runtime data in a specific local directory.
+
+The tool works without a server, account, or network connection. Server sync is an optional extension for a second device.
+
 ## Requirements
 
 - Python 3.11 or newer
