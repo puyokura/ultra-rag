@@ -9,6 +9,7 @@ silently. Request bodies are never logged.
 from __future__ import annotations
 
 import hmac
+import ipaddress
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -20,8 +21,13 @@ from contracts.models import ContractError, Proposal
 from contracts.util import sha256_hex
 from rag.service import RagService
 from rag.store import StoreError
+from rag.web_ui import PAGE, build_view
 
 MAX_BODY = 8 * 1024 * 1024
+CSP = (
+    "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
+    "connect-src 'self'; img-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+)
 
 
 class ApiError(Exception):
@@ -72,6 +78,25 @@ class RagHttpServer:
                 self.end_headers()
                 self.wfile.write(body)
 
+            def _lan_only(self) -> bool:
+                try:
+                    address = ipaddress.ip_address(self.client_address[0].split("%")[0])
+                except ValueError:
+                    return False
+                return address.is_private or address.is_loopback
+
+            def _send_html(self, status: int, text: str) -> None:
+                body = text.encode("utf-8")
+                self.send_response(status)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("Referrer-Policy", "no-referrer")
+                self.send_header("Content-Security-Policy", CSP)
+                self.end_headers()
+                self.wfile.write(body)
+
             def _read_json(self) -> dict[str, Any]:
                 try:
                     length = int(self.headers.get("Content-Length", "0"))
@@ -95,6 +120,16 @@ class RagHttpServer:
                 try:
                     if parsed.path == "/healthz" and method == "GET":
                         self._send(200, {"ok": True, "revision": server.service.revision()})
+                        return
+                    if method == "GET" and parsed.path in ("/ui", "/ui/"):
+                        if not self._lan_only():
+                            raise ApiError(403, "the memory browser is available on the local network only")
+                        self._send_html(200, PAGE)
+                        return
+                    if method == "GET" and parsed.path == "/ui/data":
+                        if not self._lan_only():
+                            raise ApiError(403, "the memory browser is available on the local network only")
+                        self._send(200, build_view(server.service))
                         return
                     if not self._authorized():
                         raise ApiError(401, "missing or invalid bearer token")
