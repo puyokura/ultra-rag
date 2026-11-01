@@ -12,10 +12,14 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import threading
+import time
 from pathlib import Path
+from typing import Any, Callable
 
 from contracts.models import SearchHit
-from contracts.util import canonical_json, ensure_dir, sha256_hex, write_lock
+from contracts.util import canonical_json, ensure_dir, sha256_hex, utc_now, write_lock
+from rag.embeddings import EmbeddingUnavailable, Embedder, text_digest
 from rag.store import MemoryStore, RevisionState
 
 SCHEMA = """
@@ -55,6 +59,28 @@ CREATE VIRTUAL TABLE IF NOT EXISTS excerpts_fts USING fts5(
   text,
   tokenize='trigram'
 );
+CREATE TABLE IF NOT EXISTS embeddings (
+  source_kind TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  model_id TEXT NOT NULL,
+  prompt_id TEXT NOT NULL,
+  dim INTEGER NOT NULL,
+  text_hash TEXT NOT NULL,
+  vec BLOB NOT NULL,
+  status TEXT NOT NULL,
+  scope TEXT NOT NULL,
+  project_id TEXT,
+  session_id TEXT,
+  message_id TEXT,
+  part_start INTEGER,
+  part_end INTEGER,
+  turn INTEGER,
+  revision INTEGER NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY(source_kind, source_id)
+);
+CREATE INDEX IF NOT EXISTS embeddings_scope ON embeddings(scope, status);
+CREATE TABLE IF NOT EXISTS embedding_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 """
 
 TERM_RE = re.compile(r"[0-9A-Za-z_]+|[\u3040-\u30ff\u3400-\u9fff]+")
@@ -65,10 +91,21 @@ def _fts_quote(value: str) -> str:
 
 
 class SearchIndex:
-    def __init__(self, path: Path, store: MemoryStore):
+    def __init__(
+        self,
+        path: Path,
+        store: MemoryStore,
+        embedding_enabled: bool = False,
+        embedder_factory: Callable[[], Embedder] | None = None,
+    ):
         self.path = path
         self.store = store
         self.lock_file = path.with_suffix(".lock")
+        self.embedding_enabled = bool(embedding_enabled)
+        self._embedder_factory = embedder_factory
+        self._embedder: Embedder | None = None
+        self._embedding_error: str | None = None
+        self._embedding_lock = threading.Lock()
 
     def _connect(self) -> sqlite3.Connection:
         ensure_dir(self.path.parent)
@@ -169,6 +206,427 @@ class SearchIndex:
         if revision != state.revision:
             self.rebuild(state)
 
+    # ---------------------------------------------------------- embeddings
+    def _get_embedder(self) -> Embedder:
+        if self._embedder is not None:
+            return self._embedder
+        if self._embedder_factory is None:
+            raise EmbeddingUnavailable("no embedding backend configured")
+        self._embedder = self._embedder_factory()
+        return self._embedder
+
+    def _embedding_signature(self, embedder: Embedder) -> str:
+        return canonical_json(
+            {
+                "model_id": embedder.model_id,
+                "prompt_id": embedder.prompt_id,
+                "dim": embedder.dim,
+            }
+        )
+
+    def _forbidden_excerpt_ids(self, state: RevisionState) -> set[str]:
+        forbidden: set[str] = set()
+        for tombstone in state.tombstones:
+            memory_id = (
+                tombstone.get("id")
+                or tombstone.get("memory_id")
+                or tombstone.get("target_id")
+            )
+            record = state.memories.get(memory_id) if memory_id else None
+            if record is None:
+                continue
+            for ref in record.source_refs:
+                if ref.excerpt_id:
+                    forbidden.add(ref.excerpt_id)
+        return forbidden
+
+    def _embedding_sources(
+        self, connection: sqlite3.Connection, state: RevisionState
+    ) -> list[dict[str, Any]]:
+        sources: list[dict[str, Any]] = []
+        for row in connection.execute(
+            "SELECT id, statement, conditions, exceptions, status, scope, project_id, revision "
+            "FROM memories WHERE status IN ('adopted', 'pending', 'conflict')"
+        ):
+            conditions = json.loads(row["conditions"] or "[]")
+            exceptions = json.loads(row["exceptions"] or "[]")
+            text = "\n".join([row["statement"], *conditions, *exceptions])
+            sources.append(
+                {
+                    "source_kind": "memory",
+                    "source_id": row["id"],
+                    "text": text,
+                    "status": row["status"],
+                    "scope": row["scope"],
+                    "project_id": row["project_id"],
+                    "session_id": None,
+                    "message_id": None,
+                    "part_start": None,
+                    "part_end": None,
+                    "turn": None,
+                    "revision": row["revision"],
+                }
+            )
+        forbidden = self._forbidden_excerpt_ids(state)
+        for row in connection.execute(
+            "SELECT id, session_id, project_id, message_id, start, end, turn, text "
+            "FROM excerpts"
+        ):
+            if row["id"] in forbidden:
+                continue
+            sources.append(
+                {
+                    "source_kind": "excerpt",
+                    "source_id": row["id"],
+                    "text": row["text"],
+                    "status": "adopted",
+                    "scope": "session",
+                    "project_id": row["project_id"],
+                    "session_id": row["session_id"],
+                    "message_id": row["message_id"],
+                    "part_start": row["start"],
+                    "part_end": row["end"],
+                    "turn": row["turn"],
+                    "revision": state.revision,
+                }
+            )
+        return sources
+
+    def build_embeddings(
+        self, state: RevisionState | None = None, force: bool = False
+    ) -> dict[str, Any]:
+        """Rebuild or incrementally refresh the derivative embedding table."""
+        if not self.embedding_enabled:
+            return {"ok": False, "enabled": False, "reason": "embedding search is disabled"}
+        with self._embedding_lock:
+            try:
+                embedder = self._get_embedder()
+            except EmbeddingUnavailable as error:
+                self._embedding_error = str(error)
+                return {"ok": False, "enabled": True, "error": str(error)}
+            state = state or self.store.load()
+            started = time.perf_counter()
+            with write_lock(self.lock_file, 30):
+                connection = self._connect()
+                try:
+                    connection.execute("BEGIN IMMEDIATE")
+                    signature = self._embedding_signature(embedder)
+                    row = connection.execute(
+                        "SELECT value FROM embedding_meta WHERE key='signature'"
+                    ).fetchone()
+                    previous = row["value"] if row else None
+                    if force or previous != signature:
+                        connection.execute("DELETE FROM embeddings")
+                        connection.execute(
+                            "INSERT INTO embedding_meta(key, value) VALUES ('signature', ?) "
+                            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                            (signature,),
+                        )
+                    sources = self._embedding_sources(connection, state)
+                    existing = {
+                        (item["source_kind"], item["source_id"]): dict(item)
+                        for item in connection.execute(
+                            "SELECT source_kind, source_id, text_hash, vec, status, scope, "
+                            "project_id, session_id, message_id, part_start, part_end, turn, revision "
+                            "FROM embeddings"
+                        )
+                    }
+                    changed: list[dict[str, Any]] = []
+                    upserts: list[tuple[dict[str, Any], bytes | None]] = []
+                    for source in sources:
+                        source["text_hash"] = text_digest(source["text"])
+                        previous = existing.get((source["source_kind"], source["source_id"]))
+                        metadata = (
+                            source["status"],
+                            source["scope"],
+                            source["project_id"],
+                            source["session_id"],
+                            source["message_id"],
+                            source["part_start"],
+                            source["part_end"],
+                            source["turn"],
+                            source["revision"],
+                        )
+                        if previous is None:
+                            changed.append(source)
+                            upserts.append((source, None))
+                            continue
+                        previous_metadata = (
+                            previous["status"],
+                            previous["scope"],
+                            previous["project_id"],
+                            previous["session_id"],
+                            previous["message_id"],
+                            previous["part_start"],
+                            previous["part_end"],
+                            previous["turn"],
+                            previous["revision"],
+                        )
+                        if previous["text_hash"] != source["text_hash"]:
+                            changed.append(source)
+                            upserts.append((source, None))
+                        elif previous_metadata != metadata:
+                            upserts.append((source, previous["vec"]))
+                    vectors = (
+                        embedder.encode_documents([item["text"] for item in changed])
+                        if changed
+                        else []
+                    )
+                    if len(vectors) != len(changed):
+                        raise EmbeddingUnavailable("embedding backend returned a wrong row count")
+                    import numpy as np
+
+                    now = utc_now()
+                    for source, vector in zip(changed, vectors, strict=True):
+                        source["_vector"] = np.asarray(vector, dtype=np.float32).reshape(-1)
+                    for source, previous_vec in upserts:
+                        array = source.get("_vector")
+                        if array is None:
+                            array = np.frombuffer(previous_vec, dtype=np.float32)
+                        if int(array.shape[0]) != embedder.dim:
+                            raise EmbeddingUnavailable("embedding backend returned a wrong dimension")
+                        connection.execute(
+                            "INSERT INTO embeddings("
+                            "source_kind, source_id, model_id, prompt_id, dim, text_hash, vec, "
+                            "status, scope, project_id, session_id, message_id, part_start, part_end, "
+                            "turn, revision, updated_at"
+                            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                            "ON CONFLICT(source_kind, source_id) DO UPDATE SET "
+                            "model_id=excluded.model_id, prompt_id=excluded.prompt_id, dim=excluded.dim, "
+                            "text_hash=excluded.text_hash, vec=excluded.vec, status=excluded.status, "
+                            "scope=excluded.scope, project_id=excluded.project_id, "
+                            "session_id=excluded.session_id, message_id=excluded.message_id, "
+                            "part_start=excluded.part_start, part_end=excluded.part_end, "
+                            "turn=excluded.turn, revision=excluded.revision, updated_at=excluded.updated_at",
+                            (
+                                source["source_kind"],
+                                source["source_id"],
+                                embedder.model_id,
+                                embedder.prompt_id,
+                                embedder.dim,
+                                source["text_hash"],
+                                array.tobytes(),
+                                source["status"],
+                                source["scope"],
+                                source["project_id"],
+                                source["session_id"],
+                                source["message_id"],
+                                source["part_start"],
+                                source["part_end"],
+                                source["turn"],
+                                source["revision"],
+                                now,
+                            ),
+                        )
+                    current = {(item["source_kind"], item["source_id"]) for item in sources}
+                    for key in existing:
+                        if key not in current:
+                            connection.execute(
+                                "DELETE FROM embeddings WHERE source_kind=? AND source_id=?",
+                                key,
+                            )
+                    connection.execute(
+                        "INSERT INTO embedding_meta(key, value) VALUES ('revision', ?) "
+                        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                        (str(state.revision),),
+                    )
+                    connection.commit()
+                except Exception as error:
+                    connection.rollback()
+                    self._embedding_error = str(error)
+                    return {"ok": False, "enabled": True, "error": str(error)}
+                finally:
+                    connection.close()
+            self._embedding_error = None
+            return {
+                "ok": True,
+                "enabled": True,
+                "model_id": embedder.model_id,
+                "dim": embedder.dim,
+                "revision": state.revision,
+                "total": len(sources),
+                "embedded": len(changed),
+                "reused": len(sources) - len(changed),
+                "seconds": round(time.perf_counter() - started, 3),
+            }
+
+    def ensure_embeddings(self, state: RevisionState | None = None, force: bool = False) -> None:
+        if not self.embedding_enabled:
+            return
+        state = state or self.store.load()
+        embedder = self._get_embedder()
+        connection = self._connect()
+        try:
+            signature = connection.execute(
+                "SELECT value FROM embedding_meta WHERE key='signature'"
+            ).fetchone()
+            revision = connection.execute(
+                "SELECT value FROM embedding_meta WHERE key='revision'"
+            ).fetchone()
+        finally:
+            connection.close()
+        expected = self._embedding_signature(embedder)
+        if (
+            force
+            or signature is None
+            or signature["value"] != expected
+            or revision is None
+            or revision["value"] != str(state.revision)
+        ):
+            result = self.build_embeddings(state, force=force)
+            if not result.get("ok"):
+                raise EmbeddingUnavailable(str(result.get("error") or result.get("reason")))
+
+    def embedding_status(self) -> dict[str, Any]:
+        if not self.embedding_enabled:
+            return {"enabled": False}
+        connection = self._connect()
+        try:
+            signature = connection.execute(
+                "SELECT value FROM embedding_meta WHERE key='signature'"
+            ).fetchone()
+            revision = connection.execute(
+                "SELECT value FROM embedding_meta WHERE key='revision'"
+            ).fetchone()
+            count = connection.execute("SELECT COUNT(*) AS value FROM embeddings").fetchone()
+        finally:
+            connection.close()
+        return {
+            "enabled": True,
+            "signature": signature["value"] if signature else None,
+            "revision": int(revision["value"]) if revision else None,
+            "vectors": int(count["value"]) if count else 0,
+            "error": self._embedding_error,
+        }
+
+    def _semantic_hits(
+        self,
+        query: str,
+        state: RevisionState,
+        project_id: str | None,
+        allowed_scopes: set[str],
+        include_pending: bool,
+        limit: int,
+        session_id: str | None,
+    ) -> list[SearchHit]:
+        import numpy as np
+
+        embedder = self._get_embedder()
+        query_vector = np.asarray(embedder.encode_query(query), dtype=np.float32).reshape(-1)
+        if int(query_vector.shape[0]) != embedder.dim:
+            raise EmbeddingUnavailable("query embedding has a wrong dimension")
+        statuses = {"adopted", "pending", "conflict"} if include_pending else {"adopted"}
+        forbidden = self._forbidden_excerpt_ids(state)
+        connection = self._connect()
+        try:
+            rows = connection.execute(
+                "SELECT * FROM embeddings WHERE model_id=? AND prompt_id=? AND dim=?",
+                (embedder.model_id, embedder.prompt_id, embedder.dim),
+            ).fetchall()
+            excerpt_ids = [
+                row["source_id"]
+                for row in rows
+                if row["source_kind"] == "excerpt" and row["session_id"] == session_id
+            ]
+            excerpt_meta: dict[str, sqlite3.Row] = {}
+            if excerpt_ids:
+                placeholders = ",".join("?" for _ in excerpt_ids)
+                for item in connection.execute(
+                    f"SELECT id, session_id, project_id, message_id, start, end, text "
+                    f"FROM excerpts WHERE id IN ({placeholders})",
+                    excerpt_ids,
+                ):
+                    excerpt_meta[item["id"]] = item
+        finally:
+            connection.close()
+
+        ranked: list[tuple[float, SearchHit]] = []
+        for row in rows:
+            if row["source_kind"] == "memory":
+                record = state.memories.get(row["source_id"])
+                if record is None or record.status not in statuses:
+                    continue
+                if record.scope not in allowed_scopes:
+                    continue
+                if record.scope == "session" and (
+                    not session_id or record.owner_session_id != session_id
+                ):
+                    continue
+                if record.scope == "project":
+                    if not project_id or record.project_id != project_id:
+                        continue
+                vector = np.frombuffer(row["vec"], dtype=np.float32)
+                score = float(np.dot(vector, query_vector))
+                ranked.append(
+                    (
+                        score,
+                        SearchHit(
+                            memory_id=record.id,
+                            statement=record.statement,
+                            kind=record.kind,
+                            scope=record.scope,
+                            project_id=record.project_id,
+                            status=record.status,
+                            revision=record.revision,
+                            score=score,
+                            conditions=list(record.conditions),
+                            exceptions=list(record.exceptions),
+                            source_refs=list(record.source_refs),
+                            hit_type="semantic",
+                        ),
+                    )
+                )
+                continue
+            if not session_id or "session" not in allowed_scopes:
+                continue
+            if row["session_id"] != session_id or row["source_id"] in forbidden:
+                continue
+            if project_id and row["project_id"] not in (None, project_id):
+                continue
+            meta = excerpt_meta.get(row["source_id"])
+            if meta is None:
+                continue
+            vector = np.frombuffer(row["vec"], dtype=np.float32)
+            score = float(np.dot(vector, query_vector))
+            ranked.append(
+                (
+                    score,
+                    SearchHit(
+                        memory_id="",
+                        statement=meta["text"],
+                        kind="excerpt",
+                        scope="session",
+                        project_id=meta["project_id"],
+                        status="adopted",
+                        revision=state.revision,
+                        score=score,
+                        hit_type="semantic",
+                        excerpt_id=meta["id"],
+                        session_id=meta["session_id"],
+                        message_id=meta["message_id"],
+                        start=meta["start"],
+                        end=meta["end"],
+                    ),
+                )
+            )
+        ranked.sort(key=lambda item: item[0], reverse=True)
+        return [hit for _, hit in ranked[: max(limit * 4, 16)]]
+
+    def _fuse(
+        self, literal: list[SearchHit], semantic: list[SearchHit], limit: int
+    ) -> list[SearchHit]:
+        fused: dict[str, list[Any]] = {}
+        for hits in (literal, semantic):
+            for rank, hit in enumerate(hits, start=1):
+                key = hit.excerpt_id or hit.memory_id
+                entry = fused.setdefault(key, [0.0, hit])
+                entry[0] += 1.0 / (60 + rank)
+        ordered = sorted(
+            fused.values(),
+            key=lambda entry: (-entry[0], entry[1].excerpt_id or entry[1].memory_id),
+        )
+        return [entry[1] for entry in ordered[:limit]]
+
     def search(
         self,
         query: str,
@@ -265,6 +723,25 @@ class SearchIndex:
                 )
                 if len(hits) >= limit:
                     break
+        if self.embedding_enabled:
+            semantic: list[SearchHit] = []
+            try:
+                self.ensure_embeddings(state)
+                semantic = self._semantic_hits(
+                    text,
+                    state,
+                    project_id,
+                    allowed_scopes,
+                    include_pending,
+                    limit,
+                    session_id,
+                )
+            except Exception as error:
+                # Literal search is the guaranteed path; a missing model, a
+                # download failure, or a corrupt vector must never break search.
+                self._embedding_error = str(error)
+            if semantic:
+                hits = self._fuse(hits, semantic, limit)
         return hits
 
     def _excerpt_rows(

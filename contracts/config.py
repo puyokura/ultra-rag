@@ -92,6 +92,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "rag": {
         "max_excerpt_chars": 4000,
         "auto_candidate_scope": "personal",
+        "embedding_enabled": False,
+        "embedding_model": "cl-nagoya/ruri-v3-310m",
+        "embedding_device": "cpu",
+        "embedding_batch_size": 16,
     },
     "secret": {
         "lease_seconds": 300,

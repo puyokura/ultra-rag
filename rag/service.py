@@ -37,7 +37,29 @@ class RagService:
             role=role,
             max_excerpt_chars=int(self.config.get("rag", {}).get("max_excerpt_chars", 4000)),
         )
-        self.index = index or SearchIndex(layout.rag / "index" / "search.sqlite", self.store)
+        rag_config = self.config.get("rag", {})
+        embedding_enabled = bool(rag_config.get("embedding_enabled", False))
+        embedding_model = str(rag_config.get("embedding_model", "cl-nagoya/ruri-v3-310m"))
+        embedding_device = str(rag_config.get("embedding_device", "cpu"))
+        embedding_batch_size = int(rag_config.get("embedding_batch_size", 16))
+
+        def embedder_factory():
+            # Imported lazily: the optional ML runtime must stay out of the
+            # literal path and out of hosts that never enable embeddings.
+            from rag.embeddings import SentenceTransformerEmbedder
+
+            return SentenceTransformerEmbedder(
+                model_id=embedding_model,
+                device=embedding_device,
+                batch_size=embedding_batch_size,
+            )
+
+        self.index = index or SearchIndex(
+            layout.rag / "index" / "search.sqlite",
+            self.store,
+            embedding_enabled=embedding_enabled,
+            embedder_factory=embedder_factory,
+        )
         self.session_state_file = self.store.session_state_file
         self.session_state_lock = self.store.control_dir / "session-state.lock"
 
@@ -49,6 +71,12 @@ class RagService:
 
     def revision(self) -> int:
         return self.store.current_revision()
+
+    def build_embeddings(self, force: bool = False) -> dict[str, Any]:
+        return self.index.build_embeddings(self.store.load(), force=force)
+
+    def embedding_status(self) -> dict[str, Any]:
+        return self.index.embedding_status()
 
     # ---------------------------------------------------------------- snapshot
     def _seen_revision(self, session_id: str) -> int | None:

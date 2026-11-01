@@ -163,6 +163,12 @@ def _project_for(args: argparse.Namespace, scope: str) -> str | None:
     return None
 
 
+def cmd_rag_embed_index(args: argparse.Namespace) -> int:
+    result = _service(args).build_embeddings(force=args.rebuild)
+    _print(result)
+    return 0 if result.get("ok") else 1
+
+
 def cmd_rag_remember(args: argparse.Namespace) -> int:
     project_id = _project_for(args, args.scope)
     activity = json.loads(args.activity_json) if args.activity_json else None
@@ -736,6 +742,9 @@ def build_parser() -> argparse.ArgumentParser:
     search.add_argument("--include-pending", action="store_true")
     search.add_argument("--limit", type=int, default=8)
     search.set_defaults(func=cmd_rag_search)
+    embed_index = rag_sub.add_parser("embed-index", help="build the optional local embedding index")
+    embed_index.add_argument("--rebuild", action="store_true")
+    embed_index.set_defaults(func=cmd_rag_embed_index)
     remember = rag_sub.add_parser("remember")
     remember.add_argument("statement")
     remember.add_argument("--kind", default="preference")
