@@ -49,6 +49,10 @@ class DshPluginHarnessTests(unittest.TestCase):
         self.assertIn("必ず実プロセスで検証する", data["injected"])
         self.assertIn("ultra-RAG", data["summary"])
         self.assertFalse([warning for warning in data["warnings"] if "failed" in warning])
+        self.assertTrue(
+            any("could not start" in warning or "exited" in warning or "ok=false" in warning for warning in data["failureWarnings"]),
+            data["failureWarnings"],
+        )
         deadline = time.time() + 20
         while time.time() < deadline:
             state = self.service.store.load()
@@ -59,6 +63,9 @@ class DshPluginHarnessTests(unittest.TestCase):
         session = self.service.store.load().sessions.get("sess_plugin_0001")
         self.assertIsNotNone(session)
         self.assertTrue(session.excerpts)
+        # #14: the live path and the importer both bind the turn to the first
+        # user message of that turn.
+        self.assertEqual(session.turns[0].user_message_id, "msg-user-2")
         self.assertTrue(any("実測を優先" in excerpt.text for excerpt in session.excerpts))
 
 

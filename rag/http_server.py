@@ -108,7 +108,7 @@ class RagHttpServer:
                         ("POST", "/v1/forget"): lambda: server.service.forget(**self._read_json()).to_dict(),
                         ("POST", "/v1/delete"): lambda: server.service.delete(**self._read_json()).to_dict(),
                         ("POST", "/v1/confirm"): lambda: server.service.confirm(**self._read_json()).to_dict(),
-                        ("POST", "/v1/turn"): lambda: server.service.record_turn(**self._read_json()),
+                        ("POST", "/v1/turn"): lambda: _turn(server, self._read_json()),
                         ("POST", "/v1/explain"): lambda: server.service.explain(**server._explain_args(self._read_json())),
                         ("POST", "/v1/reference"): lambda: server.service.reference(**server._reference_args(self._read_json())),
                         ("GET", "/v1/candidates"): lambda: server.service.list_candidates(_query_one(parsed.query, "project_id")),
@@ -215,3 +215,10 @@ def _hostkeys(layout: Layout) -> dict[str, Any]:
 
 def _pick(body: dict[str, Any], allowed: set[str]) -> dict[str, Any]:
     return {key: value for key, value in body.items() if key in allowed}
+
+
+def _turn(server, payload: dict[str, Any]) -> dict[str, Any]:
+    """Apply a queued turn from its validated excerpts, or as raw text."""
+    if "user_text" in payload:
+        return server.service.record_turn(**payload)
+    return server.service.record_synced_turn(**payload)

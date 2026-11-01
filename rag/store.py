@@ -50,6 +50,7 @@ from rag.profile import (
     render_profile,
     render_project_overview,
 )
+from rag.redaction import redact_text
 
 MEMORY_FILE_RE = re.compile(r"^mem_[0-9a-f]{32}\.md$")
 SESSION_FILE_RE = re.compile(r"^sess_[0-9a-zA-Z._-]+\.md$|^[0-9a-zA-Z._-]+\.md$")
@@ -220,6 +221,7 @@ class MemoryStore:
         self.current_file = self.control_dir / "current.json"
         self.lock_file = self.control_dir / "write.lock"
         self.queue_file = self.control_dir / "unsynced.jsonl"
+        self.results_file = self.control_dir / "update-results.jsonl"
         self.session_state_file = self.control_dir / "session-state.json"
 
     # ------------------------------------------------------------------ basics
@@ -397,6 +399,17 @@ class MemoryStore:
             return self._queue_proposal(proposal)
         with write_lock(self.lock_file, self.lock_timeout):
             base = self.load()
+            recorded = self._recorded_result(proposal.update_id)
+            if recorded is not None:
+                if recorded.get("fingerprint") != proposal.fingerprint():
+                    return self._result(
+                        proposal,
+                        "rejected",
+                        (recorded.get("result") or {}).get("memory_id"),
+                        base.revision,
+                        "the same update_id was already used with different content",
+                    )
+                return ProposalResult(**recorded["result"])
             previous = base.updates.get(proposal.update_id)
             if previous is not None:
                 if previous.get("fingerprint") != proposal.fingerprint():
@@ -433,6 +446,7 @@ class MemoryStore:
             else:  # pragma: no cover - validate() already restricts
                 raise ContractError(f"unsupported operation: {proposal.op}")
             if not changed:
+                self._remember_result(proposal, result)
                 return result
             new_revision = base.revision + 1
             result.revision = new_revision
@@ -453,6 +467,7 @@ class MemoryStore:
             }
             updates.append(entry)
             self._render_revision(new_revision, base.revision, memories, sessions, tombstones, updates)
+            self._remember_result(proposal, result)
             return result
 
     @staticmethod
@@ -462,6 +477,36 @@ class MemoryStore:
         """Records changed in this proposal are stamped by the apply methods."""
         return None
 
+    def _attested(self, proposal: Proposal, sessions: dict[str, Any]) -> bool:
+        """Check a host/owner adoption claim before a record may be adopted.
+
+        ``owner_operation`` is the owner CLI or an authenticated sync peer.
+        ``user_message`` additionally has to match a stored user excerpt: the
+        statement digest and the range are checked, so a caller that merely
+        labels its own text cannot adopt it.
+        """
+        if proposal.adoption == "owner_operation":
+            return True
+        if proposal.adoption != "user_message":
+            return False
+        data = proposal.attestation or {}
+        if data.get("role") != "user":
+            return False
+        statement = (proposal.statement or "").strip()
+        if not statement or sha256_hex(statement) != data.get("statement_digest"):
+            return False
+        session = sessions.get(str(data.get("session_id") or ""))
+        if session is None:
+            return False
+        message_id = data.get("message_id")
+        start, end = data.get("start"), data.get("end")
+        if not message_id or not isinstance(start, int) or not isinstance(end, int):
+            return False
+        return any(
+            excerpt.message_id == message_id and excerpt.start <= start and end <= excerpt.end
+            for excerpt in session.excerpts
+        )
+
     def _apply_create(
         self,
         proposal: Proposal,
@@ -470,7 +515,26 @@ class MemoryStore:
         sessions: dict[str, SessionRecord],
         tombstones: list[dict[str, Any]],
     ) -> tuple[ProposalResult, bool]:
-        statement = normalized_statement(proposal.statement or "")
+        statement_text, statement_edited = redact_text((proposal.statement or "").strip())
+        statement = normalized_statement(statement_text)
+        fingerprints = self._source_fingerprints(proposal.source_refs)
+        forgotten = [
+            existing
+            for existing in memories.values()
+            if existing.status == "forgotten"
+            and set(self._source_fingerprints(existing.source_refs)) & set(fingerprints)
+        ]
+        if forgotten:
+            return (
+                self._result(
+                    proposal,
+                    "rejected",
+                    forgotten[0].id,
+                    base.revision,
+                    "the source belongs to a forgotten memory; a new explicit statement is required",
+                ),
+                False,
+            )
         for existing in memories.values():
             if (
                 existing.status in ("adopted", "pending", "conflict")
@@ -478,13 +542,14 @@ class MemoryStore:
                 and existing.scope == proposal.scope
                 and existing.project_id == proposal.project_id
                 and normalized_statement(existing.statement) == statement
+                and tuple(existing.conditions) == tuple(proposal.conditions or [])
+                and tuple(existing.exceptions) == tuple(proposal.exceptions or [])
             ):
                 return (
-                    self._result(proposal, "merged", existing.id, base.revision, "an identical adopted memory already exists"),
+                    self._result(proposal, "merged", existing.id, base.revision, f"an identical memory already exists with status {existing.status}"),
                     False,
                 )
         evidence = proposal.evidence_kind or "extracted"
-        fingerprints = self._source_fingerprints(proposal.source_refs)
         blocked = [row for row in tombstones if set(row.get("source_fingerprints", [])) & set(fingerprints)]
         if blocked:
             return (
@@ -497,24 +562,33 @@ class MemoryStore:
                 ),
                 False,
             )
-        adopted = evidence in ("explicit_statement", "explicit_registration", "direct_edit")
+        adopted = evidence in ("explicit_statement", "explicit_registration", "direct_edit") and self._attested(
+            proposal, sessions
+        )
         status = "adopted" if adopted else "pending"
+        conditions = [redact_text(item)[0] for item in (proposal.conditions or [])]
+        exceptions = [redact_text(item)[0] for item in (proposal.exceptions or [])]
+        refs = copy.deepcopy(proposal.source_refs)
+        for ref in refs:
+            if ref.note:
+                ref.note = redact_text(ref.note)[0]
         record = MemoryRecord(
             id=new_id("mem"),
             kind=proposal.kind or "preference",
             scope=proposal.scope or "personal",
-            statement=(proposal.statement or "").strip(),
+            statement=statement_text,
             project_id=proposal.project_id,
             status=status,
             evidence_kind=evidence,
-            source_refs=copy.deepcopy(proposal.source_refs),
+            source_refs=refs,
             revision=base.revision + 1,
             recorded_at=utc_now(),
             effective_at=utc_now(),
-            conditions=list(proposal.conditions),
-            exceptions=list(proposal.exceptions),
+            conditions=conditions,
+            exceptions=exceptions,
             origin="conversation",
             note_method=None,
+            owner_session_id=proposal.session_id if (proposal.scope == "session") else None,
         ).validate()
         memories[record.id] = record
         message = "adopted" if adopted else "stored as a confirmation candidate"
@@ -551,21 +625,32 @@ class MemoryStore:
             )
         if target.status in ("deleted",):
             return self._result(proposal, "rejected", target.id, base.revision, "target memory is deleted"), False
-        if not self._explicit(proposal):
+        if target.scope == "session" and target.owner_session_id != proposal.session_id:
             return (
                 self._result(
                     proposal,
                     "rejected",
                     target.id,
                     base.revision,
-                    "an update of an existing memory requires explicit evidence; use create for an inferred candidate",
+                    "session memory belongs to another session",
+                ),
+                False,
+            )
+        if not self._attested(proposal, sessions):
+            return (
+                self._result(
+                    proposal,
+                    "rejected",
+                    target.id,
+                    base.revision,
+                    "an update of an existing memory requires the owner or an observed user message; no change was applied",
                 ),
                 False,
             )
         expected = proposal.target_revision if proposal.target_revision is not None else proposal.base_revision
         if target.revision > expected:
             same = proposal.statement is not None and normalized_statement(proposal.statement) == normalized_statement(target.statement)
-            if same and not proposal.conditions and not proposal.exceptions:
+            if same and proposal.conditions is None and proposal.exceptions is None:
                 return self._result(proposal, "merged", target.id, base.revision, "the target already has the proposed content"), False
             return (
                 self._result(
@@ -577,23 +662,36 @@ class MemoryStore:
                 ),
                 False,
             )
+        if target.status == "superseded":
+            return (
+                self._result(
+                    proposal,
+                    "rejected",
+                    target.id,
+                    base.revision,
+                    "target is a superseded version; update the current adopted version",
+                ),
+                False,
+            )
+        new_statement = redact_text((proposal.statement or target.statement).strip())[0]
         new_record = MemoryRecord(
             id=new_id("mem"),
             kind=proposal.kind or target.kind,
             scope=proposal.scope or target.scope,
-            statement=(proposal.statement or target.statement).strip(),
+            statement=new_statement,
             project_id=proposal.project_id if proposal.scope is not None else target.project_id,
             status="adopted",
             evidence_kind=proposal.evidence_kind or "explicit_statement",
-            source_refs=copy.deepcopy(target.source_refs) + copy.deepcopy(proposal.source_refs),
+            source_refs=copy.deepcopy(proposal.source_refs) or copy.deepcopy(target.source_refs),
             revision=base.revision + 1,
             recorded_at=utc_now(),
             effective_at=utc_now(),
-            conditions=list(proposal.conditions) if proposal.conditions else list(target.conditions),
-            exceptions=list(proposal.exceptions) if proposal.exceptions else list(target.exceptions),
+            conditions=[redact_text(item)[0] for item in proposal.conditions] if proposal.conditions is not None else list(target.conditions),
+            exceptions=[redact_text(item)[0] for item in proposal.exceptions] if proposal.exceptions is not None else list(target.exceptions),
             supersedes=target.id,
             origin="conversation",
             note_method=None,
+            owner_session_id=(proposal.session_id if (proposal.scope or target.scope) == "session" else None),
         ).validate()
         target.status = "superseded"
         target.revision = base.revision + 1
@@ -666,6 +764,22 @@ class MemoryStore:
         connected = self._connected_ids(target.id, memories)
         statements = [memories[item].statement for item in connected if item in memories]
         references = [ref for item in connected if item in memories for ref in memories[item].source_refs]
+        deleted_fingerprints = {
+            fingerprint
+            for item in connected
+            if item in memories
+            for fingerprint in self._source_fingerprints(memories[item].source_refs)
+        }
+        closed_candidates = 0
+        for memory_id, record in list(memories.items()):
+            if memory_id in connected or record.status not in ("pending", "conflict"):
+                continue
+            if deleted_fingerprints & set(self._source_fingerprints(record.source_refs)):
+                record.status = "rejected"
+                record.autoload = False
+                record.revision = base.revision + 1
+                memories[memory_id] = record
+                closed_candidates += 1
         for memory_id in connected:
             record = memories.pop(memory_id, None)
             if record is None:
@@ -682,13 +796,16 @@ class MemoryStore:
                 }
             )
         self._redact_sessions(sessions, connected, statements, references)
+        message = "blocked and removed the memory and its connected versions, excerpts, and candidates"
+        if closed_candidates:
+            message += f"; closed {closed_candidates} candidate(s) that cited the same evidence"
         return (
             self._result(
                 proposal,
                 "deleted",
                 target.id,
                 base.revision + 1,
-                "blocked and removed the memory and its connected versions, excerpts, and candidates",
+                message,
             ),
             True,
         )
@@ -704,6 +821,7 @@ class MemoryStore:
         normalized_statements = {normalized_statement(item) for item in statements if item}
         for session in sessions.values():
             kept: list[Excerpt] = []
+            removed_turns: set[int] = set()
             for excerpt in session.excerpts:
                 removed = False
                 if normalized_statement(excerpt.text) in normalized_statements:
@@ -711,13 +829,19 @@ class MemoryStore:
                 for session_id, message_id in ref_keys:
                     if session.id == session_id and excerpt.message_id == message_id:
                         removed = True
-                if not removed:
-                    kept.append(excerpt)
+                if removed:
+                    if excerpt.turn is not None:
+                        removed_turns.add(excerpt.turn)
+                    continue
+                kept.append(excerpt)
             session.excerpts = kept
             for turn in session.turns:
-                if turn.note and normalized_statement(turn.note) in normalized_statements:
-                    turn.note = ""
-                    turn.note_method = "deleted"
+                note_matches = bool(turn.note) and normalized_statement(turn.note) in normalized_statements
+                if not note_matches and turn.turn not in removed_turns:
+                    continue
+                kept_for_turn = [item for item in kept if item.turn == turn.turn]
+                turn.note = extractive_note(kept_for_turn) if kept_for_turn else ""
+                turn.note_method = "extractive" if kept_for_turn else "deleted"
 
     def _apply_confirm(
         self,
@@ -732,6 +856,20 @@ class MemoryStore:
             return self._result(proposal, "rejected", None, base.revision, "candidate does not exist"), False
         if target.status not in ("pending", "conflict"):
             return self._result(proposal, "rejected", target.id, base.revision, "target is not a pending candidate"), False
+        if target.scope == "session" and target.owner_session_id != proposal.session_id:
+            return self._result(proposal, "rejected", target.id, base.revision, "session memory belongs to another session"), False
+        fingerprints = set(self._source_fingerprints(target.source_refs))
+        if fingerprints and any(fingerprints & set(row.get("source_fingerprints", [])) for row in tombstones):
+            return (
+                self._result(
+                    proposal,
+                    "rejected",
+                    target.id,
+                    base.revision,
+                    "the candidate cites deleted evidence; confirmation is refused",
+                ),
+                False,
+            )
         if proposal.note == "reject":
             target.status = "rejected"
             target.autoload = False
@@ -744,6 +882,31 @@ class MemoryStore:
         target.revision = base.revision + 1
         memories[target.id] = target
         return self._result(proposal, "adopted", target.id, base.revision + 1, "candidate confirmed and adopted"), True
+
+    def _recorded_result(self, update_id: str) -> dict[str, Any] | None:
+        if not self.results_file.exists():
+            return None
+        for row in read_jsonl(self.results_file):
+            if row.get("update_id") == update_id:
+                return row
+        return None
+
+    def _remember_result(self, proposal: Proposal, result: ProposalResult) -> None:
+        """Record every terminal result independently of the revision tree.
+
+        merged / conflict / rejected do not produce a revision, but the caller
+        still needs the outcome for idempotent retries.
+        """
+        ensure_dir(self.control_dir)
+        append_jsonl(
+            self.results_file,
+            {
+                "update_id": proposal.update_id,
+                "fingerprint": proposal.fingerprint(),
+                "result": result.to_dict(),
+                "at": utc_now(),
+            },
+        )
 
     def _queue_proposal(self, proposal: Proposal) -> ProposalResult:
         append_jsonl(
@@ -778,6 +941,22 @@ class MemoryStore:
         if project_id:
             check_identifier(project_id, "project_id")
         if self.role != "server":
+            # Validate before queueing and never persist the full transcript:
+            # only the excerpts that will actually be stored leave this process.
+            messages = [user, assistant]
+            if provided_excerpts is not None:
+                queued_excerpts = build_provided_excerpts(
+                    provided_excerpts, messages, session_id, turn, max_chars=self.max_excerpt_chars
+                )
+            else:
+                queued_excerpts = select_structural_excerpts(messages, session_id, turn)
+            if not queued_excerpts:
+                return {
+                    "saved": False,
+                    "unsynced": True,
+                    "reason": "no important content selected",
+                    "revision": self.current_revision(),
+                }
             append_jsonl(
                 self.queue_file,
                 {
@@ -787,10 +966,10 @@ class MemoryStore:
                         "session_id": session_id,
                         "project_id": project_id,
                         "turn": turn,
-                        "user": {"role": user.role, "message_id": user.message_id, "text": user.text},
-                        "assistant": {"role": assistant.role, "message_id": assistant.message_id, "text": assistant.text},
-                        "excerpts": provided_excerpts,
-                        "note": note,
+                        "user_message_id": user.message_id,
+                        "assistant_message_id": assistant.message_id,
+                        "excerpts": [item.to_dict() for item in queued_excerpts],
+                        "note": redact_text(note)[0] if note else None,
                     },
                     "status": "unsynced",
                 },
@@ -844,7 +1023,7 @@ class MemoryStore:
                 excerpts = allowed
             if not excerpts:
                 return {"saved": False, "revision": base.revision, "reason": "no important content selected"}
-            note_text = note.strip() if note else extractive_note(excerpts)
+            note_text = redact_text(note.strip())[0] if note else extractive_note(excerpts)
             note_method = "provided" if note else "extractive"
             session.excerpts.extend(excerpts)
             session.turns.append(
@@ -940,6 +1119,98 @@ class MemoryStore:
             full=full,
             created_at=utc_now(),
         )
+
+    def record_synced_turn(
+        self,
+        session_id: str,
+        project_id: str | None,
+        turn: int,
+        user_message_id: str | None,
+        assistant_message_id: str | None,
+        excerpts: list[dict[str, Any]],
+        note: str | None = None,
+    ) -> dict[str, Any]:
+        """Append a turn whose excerpts were validated by the peer replica."""
+        check_identifier(session_id, "session_id")
+        if project_id:
+            check_identifier(project_id, "project_id")
+        parsed = [Excerpt.from_dict(item) for item in excerpts]
+        if not parsed:
+            return {"saved": False, "reason": "no important content selected", "revision": self.current_revision()}
+        for item in parsed:
+            item.session_id = session_id
+            item.turn = int(turn)
+        with write_lock(self.lock_file, self.lock_timeout):
+            base = self.load()
+            sessions = copy.deepcopy(base.sessions)
+            session = sessions.get(session_id)
+            if session is None:
+                session = SessionRecord(
+                    id=session_id,
+                    project_id=project_id,
+                    created_at=utc_now(),
+                    updated_at=utc_now(),
+                )
+            existing = next((item for item in session.turns if item.turn == turn), None)
+            if existing is not None:
+                if existing.user_message_id == user_message_id and existing.assistant_message_id == assistant_message_id:
+                    return {
+                        "saved": True,
+                        "already_recorded": True,
+                        "revision": base.revision,
+                        "excerpts": len([item for item in session.excerpts if item.turn == turn]),
+                    }
+                raise StoreError(f"turn {turn} is already recorded with different message ids")
+            blocked = {
+                fingerprint
+                for tombstone in base.tombstones
+                for fingerprint in tombstone.get("source_fingerprints", [])
+            }
+            if blocked:
+                allowed = []
+                for excerpt in parsed:
+                    ref = SourceRef(
+                        session_id=excerpt.session_id,
+                        message_id=excerpt.message_id,
+                        start=excerpt.start,
+                        end=excerpt.end,
+                    )
+                    if self._ref_fingerprint(ref) in blocked:
+                        continue
+                    allowed.append(excerpt)
+                parsed = allowed
+            if not parsed:
+                return {"saved": False, "revision": base.revision, "reason": "no important content selected"}
+            note_text = redact_text(note.strip())[0] if note else extractive_note(parsed)
+            note_method = "provided" if note else "extractive"
+            session.excerpts.extend(parsed)
+            session.turns.append(
+                TurnRecord(
+                    turn=turn,
+                    user_message_id=user_message_id,
+                    assistant_message_id=assistant_message_id,
+                    recorded_at=utc_now(),
+                    note=note_text,
+                    note_method=note_method,
+                )
+            )
+            session.updated_at = utc_now()
+            sessions[session_id] = session
+            new_revision = base.revision + 1
+            self._render_revision(
+                new_revision,
+                base.revision,
+                copy.deepcopy(base.memories),
+                sessions,
+                copy.deepcopy(base.tombstones),
+                list(base.updates.values()),
+            )
+            return {
+                "saved": True,
+                "revision": new_revision,
+                "excerpts": len(parsed),
+                "note_method": note_method,
+            }
 
     def apply_bundle(self, bundle: SyncBundle) -> int:
         if self.role == "server":

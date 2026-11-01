@@ -9,6 +9,7 @@ returns masked output. A restarted runtime does not adopt or re-run an old id.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -26,9 +27,11 @@ from contracts.util import (
     mask_known_values,
     new_id,
     read_json,
+    sha256_hex,
     utc_now,
     write_json,
     write_lock,
+    write_once_json,
 )
 from secret_core.audit import AuditError, AuditLog
 from secret_core.devices import DeviceError, DeviceRegistry
@@ -133,6 +136,34 @@ def _is_link(path: Path) -> bool:
         return True
 
 
+def _safe_member(root: Path, relative: str) -> Path | None:
+    """Resolve a deliverable path without escaping ``root`` or crossing a link.
+
+    Absolute paths, drive-relative paths, and ``..`` are refused. Every path
+    component is checked for a symlink or junction before the final path is
+    resolved, because a link in the middle would otherwise copy a file from
+    outside the execution workspace.
+    """
+    raw = str(relative).replace("\\", "/")
+    if not raw or raw.startswith("/") or re.match(r"^[A-Za-z]:", raw):
+        return None
+    candidate = root
+    for part in Path(raw).parts:
+        if part in ("", ".", ".."):
+            return None
+        candidate = candidate / part
+        if _is_link(candidate):
+            return None
+    try:
+        resolved_root = root.resolve()
+        resolved = candidate.resolve()
+    except OSError:
+        return None
+    if resolved != resolved_root and resolved_root not in resolved.parents:
+        return None
+    return candidate
+
+
 def _copy_file_atomic(source: Path, destination: Path) -> None:
     ensure_dir(destination.parent)
     fd, temporary = tempfile.mkstemp(prefix=f".{destination.name}.tmp-", dir=str(destination.parent))
@@ -204,13 +235,23 @@ def _boot_marker() -> str:
     except OSError:
         pass
     if os.name == "nt":
+        # The registry value is not readable for every account, and falling back
+        # to the PID would make each process (including the resident supervisor)
+        # look like a new generation. GetTickCount64 is stable for one boot.
+        try:
+            import ctypes
+
+            ticks = ctypes.windll.kernel32.GetTickCount64()
+            return "windows-boot:" + str(int(time.time() - float(ticks) / 1000.0))
+        except Exception:
+            pass
         try:
             import winreg
 
             with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\SystemInformation") as key:
                 value, _ = winreg.QueryValueEx(key, "SystemBootTime")
             return "windows:" + str(value)
-        except OSError:
+        except Exception:
             pass
     return "pid:" + str(os.getpid())
 
@@ -250,6 +291,8 @@ class ExecManager:
         self.host = str(self.config.get("host", "pc"))
         self.epoch = RuntimeEpoch(layout).acquire()
         self.run_root = layout.run
+        self._claim_guard = threading.Lock()
+        self._claim_locks: dict[str, threading.Lock] = {}
         ensure_dir(self.run_root)
 
     # ----------------------------------------------------------------- helpers
@@ -265,7 +308,7 @@ class ExecManager:
     def _write_state(self, exec_id: str, state: ExecState) -> None:
         write_json(self._exec_dir(exec_id) / "state.json", state.to_dict())
 
-    def _reject(self, request: ExecRequest, detail: str) -> ExecState:
+    def _reject(self, request: ExecRequest, detail: str, persist_command: bool = True) -> ExecState:
         state = ExecState(
             exec_id=request.exec_id,
             status="rejected",
@@ -276,7 +319,14 @@ class ExecManager:
         directory = self._exec_dir(request.exec_id)
         ensure_dir(directory)
         if not (directory / "request.json").exists():
-            write_json(directory / "request.json", request.to_dict())
+            payload = request.to_dict()
+            if not persist_command:
+                # A request rejected for containing a secret must not be kept
+                # verbatim on disk; keep only opaque digests.
+                payload["command"] = f"[REDACTED:{sha256_hex(request.command)[:12]}]"
+                payload["deliverables"] = [f"[REDACTED:{sha256_hex(item)[:12]}]" for item in request.deliverables]
+                payload["input_paths"] = [f"[REDACTED:{sha256_hex(item)[:12]}]" for item in request.input_paths]
+            write_json(directory / "request.json", payload)
         self._write_state(request.exec_id, state)
         return state
 
@@ -315,8 +365,27 @@ class ExecManager:
         if isinstance(request, dict):
             request = ExecRequest(**{key: request[key] for key in ExecRequest.__dataclass_fields__ if key in request})
         request.validate()
-        if not self._host_ok(request.host):
-            return self._reject(request, f"host_mismatch: this runtime is {self.host}, request targets {request.host}")
+        # One claim per execution id: the reservation, state write, and spawn
+        # must be one critical section, or two callers can start the same id.
+        claim = self.run_root / "claims" / f"{request.exec_id}.lock"
+        ensure_dir(claim.parent)
+        # filelock alone is per process, so two threads in one process can both
+        # enter. Pair it with an in-process mutex for the same execution id.
+        with self._claim_guard:
+            claim_mutex = self._claim_locks.setdefault(request.exec_id, threading.Lock())
+        with claim_mutex:
+            with write_lock(claim, 60):
+                return self._execute_locked(request)
+
+    def _execute_locked(self, request: ExecRequest) -> ExecState:
+        invalidated = read_json(self.layout.secret / "invalidated.json", {}) or {}
+        if request.exec_id in (invalidated.get("exec_ids") or []):
+            return ExecState(
+                exec_id=request.exec_id,
+                status="invalid",
+                detail="invalidated by vault recreation",
+                generation=self.epoch,
+            )
         directory = self._exec_dir(request.exec_id)
         if directory.exists():
             existing = self._state(request.exec_id)
@@ -338,6 +407,8 @@ class ExecManager:
                     generation=self.epoch,
                 )
             return existing
+        if not self._host_ok(request.host):
+            return self._reject(request, f"host_mismatch: this runtime is {self.host}, request targets {request.host}")
         if request.device_id != self.config.get("device_id"):
             return self._reject(request, "device_mismatch: the request device is not this runtime's registered device")
         try:
@@ -369,17 +440,40 @@ class ExecManager:
             self.audit.start(audit_entry)
         except AuditError as error:
             return self._reject(request, f"audit_start_failed: {error}")
+        started_epoch = time.time()
+        rotation_before = read_json(self.revocations.path, {}) or {}
         try:
             values = self.vault.resolve(request.key_ids)
         except (VaultError, Exception) as error:
             self.audit.finish(request.exec_id, "rejected", "key_supply_failed")
             return self._reject(request, f"key_supply_failed: {type(error).__name__}")
+        rotation_after = read_json(self.revocations.path, {}) or {}
+        before = rotation_before.get("rotated", {}) if isinstance(rotation_before, dict) else {}
+        after = rotation_after.get("rotated", {}) if isinstance(rotation_after, dict) else {}
+        if any(
+            float(after.get(key_id, {}).get("epoch", 0)) > float(before.get(key_id, {}).get("epoch", 0))
+            for key_id in request.key_ids
+        ):
+            self.audit.finish(request.exec_id, "rejected", "key_rotated_before_start")
+            return self._reject(
+                request,
+                "key_rotated_before_start: the key was rotated while the execution was starting; retry with the new generation",
+            )
         if any(len(value) >= 8 and value in request.command for value in values.values()):
             self.audit.finish(request.exec_id, "rejected", "secret_in_command")
             return self._reject(
                 request,
                 "secret_in_command: the command text contains a selected secret value; "
                 "reference the environment variable instead",
+                persist_command=False,
+            )
+        paths = list(request.deliverables) + list(request.input_paths)
+        if any(len(value) >= 8 and value in item for value in values.values() for item in paths):
+            self.audit.finish(request.exec_id, "rejected", "secret_in_path")
+            return self._reject(
+                request,
+                "secret_in_path: a selected secret value appears in a path; use a plain file name",
+                persist_command=False,
             )
         directory = self._exec_dir(request.exec_id)
         workspace = directory / "workspace"
@@ -409,8 +503,13 @@ class ExecManager:
                 inputs=input_report,
             )
             self._write_state(request.exec_id, state)
+        if request.mode == "resident":
+            # The CLI must not own the pipes or the finalizer: it exits while
+            # the command keeps running. A detached supervisor spawns the child,
+            # owns its streams, and writes the final state and audit record.
+            self._launch_supervisor(request, state, env, started_epoch)
+            return state
         try:
-            started_epoch = time.time()
             process = self._spawn(request, env, workspace)
         except Exception as error:
             state.status = "failed"
@@ -419,8 +518,23 @@ class ExecManager:
             self._write_state(request.exec_id, state)
             self.audit.finish(request.exec_id, "failed", "spawn_failed")
             return state
-        write_json(directory / "pid.json", {"pid": process.pid, "at": utc_now()})
-        monitor = self._start_monitor(request, process.pid, started_epoch)
+        try:
+            write_json(directory / "pid.json", {"pid": process.pid, "at": utc_now()})
+            monitor = self._start_monitor(request, process.pid, started_epoch)
+        except Exception as error:
+            # The child already holds the supplied values. A monitor that never
+            # started would leave it unmanaged, so stop the tree and record it.
+            kill_process_tree(process.pid)
+            try:
+                process.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                pass
+            state.status = "failed"
+            state.ended_at = utc_now()
+            state.detail = f"monitor_start_failed: {type(error).__name__}"
+            self._write_state(request.exec_id, state)
+            self.audit.finish(request.exec_id, "failed", "monitor_start_failed")
+            return state
         stdout_chunks: list[bytes] = []
         stderr_chunks: list[bytes] = []
         threads = [
@@ -429,13 +543,6 @@ class ExecManager:
         ]
         for thread in threads:
             thread.start()
-        if request.mode == "resident":
-            threading.Thread(
-                target=self._finalize,
-                args=(request, state, process, monitor, stdout_chunks, stderr_chunks, threads, None, list(values.values()), started_epoch),
-                daemon=True,
-            ).start()
-            return state
         return self._finalize(
             request,
             state,
@@ -448,6 +555,99 @@ class ExecManager:
             list(values.values()),
             started_epoch,
         )
+
+    def _launch_supervisor(
+        self, request: ExecRequest, state: ExecState, env: dict[str, str], started_epoch: float
+    ) -> None:
+        """Hand a resident execution to a detached process and wait for its pid."""
+        directory = self._exec_dir(request.exec_id)
+        repo_root = Path(__file__).resolve().parents[2]
+        supervisor_env = dict(env)
+        supervisor_env["PYTHONPATH"] = os.pathsep.join(
+            [str(repo_root), str(repo_root / "secret-core")]
+        )
+        flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        supervisor = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "secret_core.supervisor",
+                "--home",
+                str(self.layout.home),
+                "--exec-id",
+                request.exec_id,
+                "--started-at",
+                str(started_epoch),
+            ],
+            cwd=str(repo_root),
+            env=supervisor_env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=flags if os.name == "nt" else 0,
+            start_new_session=os.name != "nt",
+        )
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            if (directory / "pid.json").exists():
+                return
+            if supervisor.poll() is not None:
+                break
+            time.sleep(0.05)
+        kill_process_tree(supervisor.pid)
+        state.status = "failed"
+        state.ended_at = utc_now()
+        state.detail = "supervisor_start_failed"
+        self._write_state(request.exec_id, state)
+        self.audit.finish(request.exec_id, "failed", "supervisor_start_failed")
+
+    def supervise_resident(self, exec_id: str, started_epoch: float) -> ExecState:
+        """Run in the detached supervisor: own the child, its streams, and state."""
+        directory = self._exec_dir(exec_id)
+        data = read_json(directory / "request.json", None)
+        if not isinstance(data, dict):
+            raise ExecError("the execution request is not available")
+        request = ExecRequest(**{key: data[key] for key in ExecRequest.__dataclass_fields__ if key in data})
+        state = self._state(exec_id) or ExecState(exec_id=exec_id, status="running", generation=self.epoch)
+        workspace = Path(state.workspace or (directory / "workspace"))
+        env = dict(os.environ)
+        values = self._supplied_values(request, env)
+        try:
+            process = self._spawn(request, env, workspace)
+            write_json(directory / "pid.json", {"pid": process.pid, "at": utc_now()})
+            monitor = self._start_monitor(request, process.pid, started_epoch)
+        except Exception as error:
+            state.status = "failed"
+            state.ended_at = utc_now()
+            state.detail = f"supervisor_spawn_failed: {type(error).__name__}"
+            self._write_state(exec_id, state)
+            self.audit.finish(exec_id, "failed", "supervisor_spawn_failed")
+            return state
+        stdout_chunks: list[bytes] = []
+        stderr_chunks: list[bytes] = []
+        threads = [
+            threading.Thread(target=self._read_stream, args=(process.stdout, stdout_chunks), daemon=True),
+            threading.Thread(target=self._read_stream, args=(process.stderr, stderr_chunks), daemon=True),
+        ]
+        for thread in threads:
+            thread.start()
+        return self._finalize(
+            request, state, process, monitor, stdout_chunks, stderr_chunks, threads, None, values, started_epoch
+        )
+
+    def _supplied_values(self, request: ExecRequest, env: dict[str, str]) -> list[str]:
+        names = {meta.id: meta.env_name for meta in self.vault.list_keys()}
+        return [env[name] for name in (names.get(key_id) for key_id in request.key_ids) if name and name in env]
+
+    @staticmethod
+    def _group_alive(pid: int) -> bool:
+        if os.name == "nt":
+            return False
+        try:
+            os.killpg(pid, 0)
+            return True
+        except OSError:
+            return False
 
     def _spawn(self, request: ExecRequest, env: dict[str, str], workspace: Path) -> subprocess.Popen:
         if os.name == "nt":
@@ -597,6 +797,16 @@ class ExecManager:
                     except subprocess.TimeoutExpired:
                         exit_code = None
                     break
+        descendants_left = False
+        if os.name != "nt" and self._group_alive(process.pid):
+            # The shell can exit while a background child still holds the
+            # supplied environment; finished must wait for the whole group.
+            wait_until = time.time() + (timeout if timeout else 5.0)
+            while time.time() < wait_until and self._group_alive(process.pid):
+                time.sleep(0.2)
+            if self._group_alive(process.pid):
+                descendants_left = True
+                kill_process_tree(process.pid)
         for thread in threads:
             thread.join(timeout=10)
         # The monitor writes its reason immediately after killing; wait briefly
@@ -667,6 +877,9 @@ class ExecManager:
         elif monitor_stopped:
             state.status = "stopped"
             state.stop_reason = "monitor_stopped"
+        elif descendants_left:
+            state.status = "stopped"
+            state.stop_reason = "descendants_timeout"
         elif monitor_reason:
             state.status = "stopped"
             state.stop_reason = str(monitor_reason)
@@ -682,7 +895,10 @@ class ExecManager:
         except OSError:
             pass
         if state.status == "finished":
-            state.artifacts = self._import_artifacts(request, Path(state.workspace or output_dir / "workspace"))
+            state.artifacts = self._mask_metadata(
+                self._import_artifacts(request, Path(state.workspace or output_dir / "workspace")),
+                list(supplied_values),
+            )
             write_json(output_dir / "state.json", state.to_dict())
         elif request.deliverables:
             state.artifacts = {
@@ -705,6 +921,16 @@ class ExecManager:
             pass
         return state
 
+    @classmethod
+    def _mask_metadata(cls, value: Any, supplied: list[str]) -> Any:
+        if isinstance(value, str):
+            return mask_known_values(value, supplied)[0]
+        if isinstance(value, list):
+            return [cls._mask_metadata(item, supplied) for item in value]
+        if isinstance(value, dict):
+            return {key: cls._mask_metadata(item, supplied) for key, item in value.items()}
+        return value
+
     def _import_artifacts(self, request: ExecRequest, workspace: Path) -> dict[str, Any]:
         if not request.deliverables:
             return {}
@@ -720,13 +946,15 @@ class ExecManager:
         failed: list[dict[str, str]] = []
         skipped: list[dict[str, str]] = []
         for relative in request.deliverables:
-            source = workspace / Path(relative.replace("\\", "/"))
-            destination = destination_root / Path(relative.replace("\\", "/"))
+            source = _safe_member(workspace, relative)
+            destination = _safe_member(destination_root, relative)
+            if source is None or destination is None:
+                failed.append(
+                    {"path": relative, "reason": "path escapes the execution root or crosses a link"}
+                )
+                continue
             if not source.exists():
                 failed.append({"path": relative, "reason": "missing in the execution workspace"})
-                continue
-            if _is_link(source):
-                skipped.append({"path": relative, "reason": "symbolic link or junction is not followed"})
                 continue
             try:
                 if source.is_dir():
@@ -755,12 +983,18 @@ class ExecManager:
             raise ExecError("unknown execution id")
         if state.generation != self.epoch:
             raise ExecError("the execution id belongs to a previous runtime generation")
+        if state.masking_status == "failed" or state.stop_reason == "masking_failed":
+            raise ExecError("artifacts are unavailable because masking failed")
         request_data = read_json(self._exec_dir(exec_id) / "request.json", None)
         if not isinstance(request_data, dict):
             raise ExecError("the execution request is not available")
         request = ExecRequest(**{key: request_data[key] for key in ExecRequest.__dataclass_fields__ if key in request_data})
         workspace = Path(state.workspace or (self._exec_dir(exec_id) / "workspace"))
-        result = self._import_artifacts(request, workspace)
+        try:
+            supplied = list(self.vault.resolve(request.key_ids).values())
+        except Exception:
+            supplied = []
+        result = self._mask_metadata(self._import_artifacts(request, workspace), supplied)
         state.artifacts = result
         self._write_state(exec_id, state)
         return result
@@ -835,6 +1069,9 @@ class ExecManager:
                     generation=self.epoch,
                 )
         with write_lock(directory / "stop.lock", 10):
-            write_json(directory / "stop", {"reason": reason, "at": utc_now()})
+            # A stop is an event, not a mutable setting: the monitor polls this
+            # file while the child runs, so replacing it can fail on Windows and
+            # a later caller must not rewrite the recorded reason.
+            write_once_json(directory / "stop", {"reason": reason, "at": utc_now()})
         state = self._state(exec_id) or ExecState(exec_id=exec_id, status="unknown", generation=self.epoch)
         return state

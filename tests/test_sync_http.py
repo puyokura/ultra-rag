@@ -110,6 +110,7 @@ class SyncTests(unittest.TestCase):
             target_id=created.memory_id,
             statement="クライアント側の変更",
             evidence_kind="explicit_statement",
+            adoption="owner_operation",
         )
         queued = self.client_service.propose(proposal)
         self.assertEqual(queued.status, "unsynced")

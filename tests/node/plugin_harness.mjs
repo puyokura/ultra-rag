@@ -87,6 +87,24 @@ sessionHandler(session, {
   },
 })
 sessionHandler(session, {
+  type: 'user/message',
+  data: {
+    id: 'msg-user-2b',
+    role: 'user',
+    source: { kind: 'user' },
+    content: [{ type: 'text', text: '追加の指示です。' }],
+  },
+})
+sessionHandler(session, {
+  type: 'user/message',
+  data: {
+    id: 'msg-user-2c',
+    role: 'user',
+    source: { kind: 'user' },
+    content: [{ type: 'text', text: '以後、必ず実測することを覚えて。' }],
+  },
+})
+sessionHandler(session, {
   type: 'assistant/message',
   data: {
     message: {
@@ -101,6 +119,48 @@ sessionHandler(session, { type: 'turn/end', data: { turn: 1, reason: { kind: 'co
 
 await new Promise((resolve) => setTimeout(resolve, 2000))
 
+// #17: a memory change in the same turn must refresh the injected block.
+await new Promise((resolve) => setTimeout(resolve, 2000))
+const beforeSummary = secondDecision.messages.find((message) => message?.source?.kind === name)?.source?.summary
+const refreshed = await handlers['agent/pre-step'](
+  { agent: { session }, messages: secondDecision.messages, turn: 2, step: 2, signal: undefined },
+  async () => ({ kind: 'enter', messages: secondDecision.messages }),
+)
+const refreshedOwn = refreshed.messages.filter((message) => message?.source?.kind === name)
+if (refreshedOwn.length !== 1) {
+  throw new Error(`cache refresh duplicated the context block: ${refreshedOwn.length}`)
+}
+if (refreshedOwn[0].source.summary === beforeSummary) {
+  throw new Error('the injected block was not refreshed after a memory update')
+}
+
+// #16: a hook that cannot start must surface a warning instead of failing silently.
+const failureWarnings = []
+const failureHandlers = {}
+const failureCtx = {
+  on(event, handler) {
+    failureHandlers[event] = handler
+  },
+  logger: {
+    warn(message) {
+      failureWarnings.push(String(message))
+    },
+  },
+}
+apply(failureCtx, {
+  home,
+  python: process.env.ULTRA_RAG_BAD_PYTHON || 'ultra-rag-missing-python-command',
+  timeoutMs: 5000,
+})
+const failureSession = { id: 'sess_plugin_failure', header: { cwd: root, delegationDepth: 0 } }
+failureHandlers['session/event'](failureSession, { type: 'turn/start', data: { turn: 1 } })
+failureHandlers['session/event'](failureSession, {
+  type: 'user/message',
+  data: { id: 'fail-user-1', role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: '失敗検知の確認です。' }] },
+})
+failureHandlers['session/event'](failureSession, { type: 'turn/end', data: { turn: 1 } })
+await new Promise((resolve) => setTimeout(resolve, 1500))
+
 console.log(
   JSON.stringify({
     ok: true,
@@ -108,5 +168,6 @@ console.log(
     injected: injectedText,
     summary: injected[0].source.summary,
     warnings,
+    failureWarnings,
   }),
 )

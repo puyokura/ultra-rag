@@ -43,7 +43,7 @@ def list_workspace() -> str:
 @unittest.skipIf(os.name == "nt" and is_elevated(), "key_exec correctly refuses administrator tokens")
 class KeyExecutionTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.temp = tempfile.TemporaryDirectory()
+        self.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.base = Path(self.temp.name)
         self.layout = new_secret_layout(self.base)
         self.config = load_config(self.layout, create=False)
@@ -61,7 +61,7 @@ class KeyExecutionTests(unittest.TestCase):
                     kill_process_tree(pid)
             except Exception:
                 pass
-        time.sleep(0.3)
+        time.sleep(0.8)
         self.temp.cleanup()
 
     def test_vault_lists_metadata_only_and_encrypts_value(self) -> None:
@@ -558,6 +558,20 @@ class KeyExecutionTests(unittest.TestCase):
             time.sleep(0.3)
         self.assertEqual(status["status"], "stopped")
         self.assertEqual(status["stop_reason"], "parallel_stop")
+
+    def test_first_stop_reason_is_kept(self) -> None:
+        command = f'"{sys.executable}" -c "import time; time.sleep(30)"'
+        result = self.service.key_exec(command, [self.key.id], mode="resident")
+        self.assertEqual(result["status"], "running")
+        self.service.stop(result["exec_id"], reason="first_reason")
+        self.service.stop(result["exec_id"], reason="second_reason")
+        deadline = time.time() + 15
+        status = self.service.exec_status(result["exec_id"])
+        while time.time() < deadline and status["status"] == "running":
+            time.sleep(0.3)
+            status = self.service.exec_status(result["exec_id"])
+        self.assertEqual(status["status"], "stopped")
+        self.assertEqual(status["stop_reason"], "first_reason")
 
     def test_vault_recreate_archives_and_invalidates_old_identities(self) -> None:
         old_device = self.config["device_id"]

@@ -120,10 +120,14 @@ class MCPServerTests(unittest.TestCase):
 
     def test_memory_tools_over_real_stdio(self) -> None:
         self.initialise()
-        adopted = self.client.call(
+        proposed = self.client.call(
             "memory_remember",
             {"statement": "実測を最優先する", "kind": "design_principle", "scope": "personal"},
         )
+        # The model-facing tool has no adoption authority: the record waits for
+        # the owner or for a hook that observed the user's own message.
+        self.assertEqual(proposed["status"], "pending")
+        adopted = self.client.call("memory_confirm", {"candidate_id": proposed["memory_id"], "decision": "adopt"})
         self.assertEqual(adopted["status"], "adopted")
         snapshot = self.client.call("memory_snapshot", {"query": "実測"})
         self.assertIn("実測を最優先する", snapshot["context_text"])

@@ -312,6 +312,7 @@ class DirectEditor:
                     exceptions=list(front.get("exceptions") or []),
                     evidence_kind="direct_edit",
                     intent="direct markdown edit",
+                    adoption="owner_operation",
                 )
                 try:
                     result = self.service.propose(proposal)

@@ -56,7 +56,7 @@ class PasswordBrokerTests(unittest.TestCase):
         self.temp.cleanup()
 
     def test_request_expires_after_ttl(self) -> None:
-        request = self.broker.create_request("host", "user", "echo hi", adapter="sudo", exec_id=self.exec_id)
+        request = self.broker.create_request("local", "user", "echo hi", adapter="sudo", exec_id=self.exec_id)
         data = json.loads((self.layout.password / "requests.json").read_text(encoding="utf-8"))
         data["requests"][request.id]["expires_at"] = (
             datetime.now(timezone.utc) - timedelta(seconds=1)
@@ -68,7 +68,7 @@ class PasswordBrokerTests(unittest.TestCase):
             self.broker.run(request.id, "correct-password", executable=[sys.executable, str(self.helper)])
 
     def test_sudo_adapter_uses_one_time_password_without_returning_raw_output(self) -> None:
-        request = self.broker.create_request("host", "user", "echo hi", adapter="sudo", exec_id=self.exec_id)
+        request = self.broker.create_request("local", "user", "echo hi", adapter="sudo", exec_id=self.exec_id)
         result = self.broker.run(
             request.id,
             "correct-password",
@@ -85,7 +85,7 @@ class PasswordBrokerTests(unittest.TestCase):
             self.broker.run(request.id, "correct-password", executable=[sys.executable, str(self.helper)])
 
     def test_sudo_authentication_failure_is_classified(self) -> None:
-        request = self.broker.create_request("host", "user", "echo hi", adapter="sudo", exec_id=self.exec_id)
+        request = self.broker.create_request("local", "user", "echo hi", adapter="sudo", exec_id=self.exec_id)
         result = self.broker.run(
             request.id,
             "wrong-password",
@@ -160,7 +160,7 @@ class PasswordBrokerTests(unittest.TestCase):
         self.assertEqual(len(self.broker.known_host_keys()), 1)
 
     def test_cancel_prevents_input(self) -> None:
-        request = self.broker.create_request("host", "user", "echo hi", adapter="sudo", exec_id=self.exec_id)
+        request = self.broker.create_request("local", "user", "echo hi", adapter="sudo", exec_id=self.exec_id)
         self.broker.cancel(request.id)
         self.assertEqual(self.broker.status(request.id)["status"], "cancelled")
         with self.assertRaises(PasswordError):
@@ -168,7 +168,7 @@ class PasswordBrokerTests(unittest.TestCase):
 
     def test_request_is_bound_to_terminal_and_exec_id(self) -> None:
         request = self.broker.create_request(
-            "host", "user", "echo hi", adapter="sudo", exec_id=self.exec_id
+            "local", "user", "echo hi", adapter="sudo", exec_id=self.exec_id
         )
         self.assertEqual(request.device_id, self.broker.device_id)
         self.assertEqual(request.exec_id, self.exec_id)
@@ -188,7 +188,7 @@ class PasswordBrokerTests(unittest.TestCase):
         registry = DeviceRegistry(self.layout)
         registry.stop(self.broker.device_id)
         with self.assertRaises(PasswordError):
-            self.broker.create_request("host", "user", "echo hi", adapter="sudo", exec_id=self.exec_id)
+            self.broker.create_request("local", "user", "echo hi", adapter="sudo", exec_id=self.exec_id)
 
     def test_multiple_host_keys_are_kept_and_selection_is_explicit(self) -> None:
         first = "AAAAC3NzaC1lZDI1NTE5AAAAIGZha2U="

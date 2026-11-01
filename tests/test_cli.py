@@ -159,7 +159,7 @@ class CLITests(unittest.TestCase):
             "--adapter",
             "sudo",
             "--host",
-            "h",
+            "local",
             "--account",
             "u",
             "--command",

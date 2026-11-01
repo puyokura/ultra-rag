@@ -133,6 +133,7 @@ class SearchIndex:
         scopes: list[str] | None = None,
         include_pending: bool = False,
         limit: int = 8,
+        session_id: str | None = None,
     ) -> list[SearchHit]:
         state = self.store.load()
         self.ensure_current(state)
@@ -159,6 +160,8 @@ class SearchIndex:
             if memory.scope == "project" and memory.project_id != project_id:
                 continue
             if memory.scope not in allowed_scopes:
+                continue
+            if memory.scope == "session" and (not session_id or memory.owner_session_id != session_id):
                 continue
             seen.add(memory.id)
             score = float(row["score"]) if row["score"] is not None else 0.0

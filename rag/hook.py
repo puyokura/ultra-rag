@@ -16,22 +16,54 @@ from typing import Any
 
 from contracts.config import ConfigError, Layout, load_config
 from contracts.project import resolve_project_id
-from contracts.util import check_identifier
+from contracts.util import check_identifier, sha256_hex
 from rag.excerpts import MessageText, select_structural_excerpts, split_paragraphs
 from rag.redaction import redact_text
+from rag.service import RagService
+from rag.store import StoreError
 
 MEMORY_REQUEST_RE = re.compile(
     r"(?:覚えて|記憶して)(?:おいて|おき|ください|下さい|ほしい|くれ|ね|もらえ|$|[。．.!！、,])"
 )
+QUOTED_SPAN_RE = re.compile(r"「[^」]*」|『[^』]*』|\"[^\"]*\"|“[^”]*”")
+NEGATION_RE = re.compile(
+    r"(?:覚え|記憶)[^。．\n]{0,14}(?:ない|なく|ません|ないで|不要|ほしくない|必要(?:は)?ない)"
+)
+DURABLE_RE = re.compile(r"以後|今後|これから|必ず|常に|絶対|方針|ルール|原則|今後とも")
 
 
-def _is_memory_request(paragraph: str) -> bool:
-    """Accept an explicit request, not a question that merely contains 覚えて."""
+def _quoted_spans(paragraph: str) -> list[tuple[int, int]]:
+    return [match.span() for match in QUOTED_SPAN_RE.finditer(paragraph)]
+
+
+def _outside_quotes(paragraph: str, spans: list[tuple[int, int]]) -> str:
+    if not spans:
+        return paragraph
+    masked = list(paragraph)
+    for start, end in spans:
+        for index in range(start, end):
+            masked[index] = " "
+    return "".join(masked)
+
+
+def _is_memory_request(paragraph: str) -> str | None:
+    """Classify a paragraph as a user instruction, a question, or neither.
+
+    Quoted text is not the user's own instruction: a marker inside quotation
+    marks is ignored. A marker that is negated is not a request. Questions are
+    ambiguous and wait for confirmation. ``None`` means "not a request".
+    """
+    spans = _quoted_spans(paragraph)
+    outside = _outside_quotes(paragraph, spans)
+    if not MEMORY_REQUEST_RE.search(outside):
+        return None
+    if NEGATION_RE.search(paragraph):
+        return None
     if "?" in paragraph or "？" in paragraph:
-        return False
-    return bool(MEMORY_REQUEST_RE.search(paragraph))
-from rag.service import RagService
-from rag.store import StoreError
+        return "ambiguous"
+    if ("今回は" in paragraph or "今回だけ" in paragraph) and not DURABLE_RE.search(paragraph):
+        return None
+    return "instruction"
 
 
 def _registration_kind(paragraph: str) -> str:
@@ -46,20 +78,19 @@ def _registration_kind(paragraph: str) -> str:
 def _explicit_registrations(
     user_text: str, user_message_id: str | None, session_id: str, project_id: str | None
 ) -> list[dict[str, Any]]:
-    """User-explicit "覚えて" paragraphs are adopted without waiting for the model.
+    """Paragraphs the user asked to remember, classified from the text itself.
 
-    Only the explicit registration marker triggers this path. Inferred policy
-    statements still require the model's memory_remember call or confirmation.
-    A paragraph explicitly limited to this project is kept in project scope; a
-    one-off "今回は" statement is not promoted into a lasting policy.
+    Only a marker outside quotation marks counts. The caller attaches a host
+    attestation (message, range, statement digest) for an instruction; an
+    ambiguous paragraph becomes a confirmation candidate instead of an adopted
+    policy.
     """
     registrations: list[dict[str, Any]] = []
     for start, end, paragraph in split_paragraphs(user_text):
-        if not _is_memory_request(paragraph):
+        classification = _is_memory_request(paragraph)
+        if classification is None:
             continue
         if len(paragraph) < 8:
-            continue
-        if "今回は" in paragraph or "今回だけ" in paragraph:
             continue
         project_specific = any(marker in paragraph for marker in ("この案件", "このプロジェクト", "このリポジトリ"))
         registrations.append(
@@ -70,6 +101,7 @@ def _explicit_registrations(
                 "project_id": project_id if project_specific and project_id else None,
                 "start": start,
                 "end": end,
+                "ambiguous": classification == "ambiguous",
                 "source_refs": [
                     {
                         "session_id": session_id,
@@ -130,6 +162,11 @@ def pre_step(home: str | None, payload: dict[str, Any]) -> dict[str, Any]:
         "related_count": len(related),
         "pending_count": len(pending),
         "notifications": result.get("notifications", []),
+        "context_chars": result.get("context_chars"),
+        "max_context_chars": result.get("max_context_chars"),
+        "overflow": result.get("overflow"),
+        "split_required": result.get("split_required"),
+        "overflow_hint": result.get("overflow_hint"),
     }
 
 
@@ -175,18 +212,47 @@ def turn_end(home: str | None, payload: dict[str, Any]) -> dict[str, Any]:
     )
     registrations = []
     for candidate in _explicit_registrations(user_text, payload.get("user_message_id"), session_id, project_id):
-        adopted = service.remember(
-            statement=candidate["statement"],
-            kind=candidate["kind"],
-            scope=candidate["scope"],
-            project_id=candidate["project_id"],
-            evidence_kind="explicit_registration",
-            session_id=session_id,
-            source_refs=candidate["source_refs"],
-            intent="explicit registration marker in the user message",
-        )
+        if candidate["ambiguous"]:
+            adopted = service.remember(
+                statement=candidate["statement"],
+                kind=candidate["kind"],
+                scope=candidate["scope"],
+                project_id=candidate["project_id"],
+                evidence_kind="extracted",
+                session_id=session_id,
+                source_refs=candidate["source_refs"],
+                intent="ambiguous request in the user message; waiting for confirmation",
+                adoption=None,
+            )
+        else:
+            adopted = service.remember(
+                statement=candidate["statement"],
+                kind=candidate["kind"],
+                scope=candidate["scope"],
+                project_id=candidate["project_id"],
+                evidence_kind="explicit_registration",
+                session_id=session_id,
+                source_refs=candidate["source_refs"],
+                intent="explicit registration marker in the user message",
+                adoption="user_message",
+                attestation={
+                    "role": "user",
+                    "session_id": session_id,
+                    "message_id": payload.get("user_message_id"),
+                    "start": candidate["start"],
+                    "end": candidate["end"],
+                    "statement_digest": sha256_hex(candidate["statement"].strip()),
+                },
+            )
         registrations.append(adopted.to_dict())
-    return {"ok": True, **result, "registrations": registrations}
+    final_revision = service.revision()
+    return {
+        "ok": True,
+        **result,
+        "turn_revision": result.get("revision"),
+        "revision": final_revision,
+        "registrations": registrations,
+    }
 
 
 def status(home: str | None, payload: dict[str, Any]) -> dict[str, Any]:

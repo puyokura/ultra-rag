@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from tests.helpers import new_layout
-from rag.hook import turn_end
+from rag.hook import pre_step, turn_end
 from rag.service import RagService
 
 
@@ -59,6 +59,20 @@ class HookTests(unittest.TestCase):
         self.assertEqual(result["registrations"], [])
         self.assertNotIn("設計より実測を優先する方針で進めます。", self.service.snapshot()["profile"])
 
+
+    def test_pre_step_forwards_the_context_budget(self) -> None:
+        result = pre_step(
+            str(self.layout.home),
+            {"cwd": str(Path(self.temp.name)), "session_id": "sess_budget", "query": "実測"},
+        )
+        self.assertTrue(result["ok"])
+        for key in ("context_chars", "max_context_chars", "overflow", "split_required"):
+            self.assertIn(key, result)
+
+    def test_turn_end_reports_the_revision_after_registrations(self) -> None:
+        result = turn_end(str(self.layout.home), self.payload("以後、必ず実測することを覚えて。"))
+        self.assertEqual(result["revision"], self.service.revision())
+        self.assertLess(result["turn_revision"], result["revision"])
 
 if __name__ == "__main__":
     unittest.main()

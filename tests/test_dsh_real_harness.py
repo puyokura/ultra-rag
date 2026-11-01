@@ -131,7 +131,9 @@ class RealDshHarnessTests(unittest.TestCase):
                 break
             time.sleep(0.4)
         self.assertIsNotNone(memory, "the scripted MCP tool call did not persist a memory")
-        self.assertEqual(memory.status, "adopted")
+        # The model-facing tool proposes; adoption needs the owner or the hook.
+        self.assertEqual(memory.status, "pending")
+        self.assertEqual(self.service.confirm(memory.id, decision="adopt").status, "adopted")
         self.assertIsNotNone(session, "the turn-end hook did not persist excerpts")
         self.assertTrue(any("以後" in excerpt.text or "実プロセス" in excerpt.text for excerpt in session.excerpts))
 

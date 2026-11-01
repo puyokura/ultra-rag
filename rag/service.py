@@ -214,13 +214,14 @@ class RagService:
         scopes: list[str] | None = None,
         include_pending: bool = False,
         limit: int = 8,
+        session_id: str | None = None,
     ) -> list[dict[str, Any]]:
         if scopes is not None and not isinstance(scopes, list):
             raise ContractError("scopes must be a list of scope names")
         limit = max(1, min(int(limit), 50))
         return [
             hit.to_dict()
-            for hit in self.index.search(query, project_id, scopes, include_pending, limit)
+            for hit in self.index.search(query, project_id, scopes, include_pending, limit, session_id=session_id)
         ]
 
     def get_memory(self, memory_id: str) -> dict[str, Any] | None:
@@ -245,6 +246,28 @@ class RagService:
                         "reason": "the source session is not stored",
                     }
                 )
+                continue
+            if ref.excerpt_id:
+                matched_excerpt = next((item for item in session.excerpts if item.id == ref.excerpt_id), None)
+                if matched_excerpt is None:
+                    evidence.append(
+                        {
+                            "session_id": session.id,
+                            "message_id": ref.message_id,
+                            "excerpt_id": ref.excerpt_id,
+                            "available": False,
+                            "reason": "no stored excerpt has this id",
+                        }
+                    )
+                else:
+                    evidence.append(
+                        {
+                            "session_id": session.id,
+                            "excerpt_id": matched_excerpt.id,
+                            "available": True,
+                            "excerpt": matched_excerpt.to_dict(),
+                        }
+                    )
                 continue
             matched = False
             for excerpt in session.excerpts:
@@ -324,7 +347,9 @@ class RagService:
             ),
         }
 
-    def list_candidates(self, project_id: str | None = None, include_rejected: bool = False) -> list[dict[str, Any]]:
+    def list_candidates(
+        self, project_id: str | None = None, include_rejected: bool = False, session_id: str | None = None
+    ) -> list[dict[str, Any]]:
         state = self.store.load()
         statuses = ("pending", "conflict", "rejected") if include_rejected else ("pending", "conflict")
         result = [
@@ -332,17 +357,18 @@ class RagService:
             for record in state.memories.values()
             if record.status in statuses
             and (record.scope != "project" or record.project_id == project_id)
+            and (record.scope != "session" or record.owner_session_id == session_id)
         ]
         return sorted(result, key=lambda item: (item["scope"], item.get("project_id") or "", item["recorded_at"], item["id"]))
 
-    def candidate_page(self, project_id: str | None = None, page: int = 1) -> dict[str, Any]:
+    def candidate_page(self, project_id: str | None = None, page: int = 1, session_id: str | None = None) -> dict[str, Any]:
         """50件単位の候補一覧。却下済みも保持し、全件へ到達できる。"""
         page_size = 50
         try:
             page = max(1, int(page))
         except (TypeError, ValueError):
             raise ContractError("page must be a positive integer")
-        rows = self.list_candidates(project_id, include_rejected=True)
+        rows = self.list_candidates(project_id, include_rejected=True, session_id=session_id)
         total = len(rows)
         pages = max(1, (total + page_size - 1) // page_size)
         start = (page - 1) * page_size
@@ -383,6 +409,8 @@ class RagService:
         session_id: str | None = None,
         source_refs: list[dict[str, Any]] | None = None,
         intent: str | None = None,
+        adoption: str | None = "owner_operation",
+        attestation: dict[str, Any] | None = None,
     ) -> ProposalResult:
         proposal = Proposal(
             op="create",
@@ -393,11 +421,13 @@ class RagService:
             scope=scope,
             project_id=project_id,
             statement=statement,
-            conditions=conditions or [],
-            exceptions=exceptions or [],
+            conditions=conditions,
+            exceptions=exceptions,
             evidence_kind=evidence_kind,
             source_refs=[SourceRef.from_dict(item) for item in (source_refs or [])],
             intent=intent,
+            adoption=adoption,
+            attestation=attestation,
         )
         return self.propose(proposal)
 
@@ -442,6 +472,9 @@ class RagService:
         evidence_kind: str = "explicit_statement",
         session_id: str | None = None,
         intent: str | None = None,
+        source_refs: list[dict[str, Any]] | None = None,
+        adoption: str | None = "owner_operation",
+        attestation: dict[str, Any] | None = None,
     ) -> ProposalResult:
         return self.propose(
             Proposal(
@@ -452,11 +485,31 @@ class RagService:
                 target_id=memory_id,
                 target_revision=target_revision,
                 statement=statement,
-                conditions=conditions or [],
-                exceptions=exceptions or [],
+                conditions=conditions,
+                exceptions=exceptions,
                 evidence_kind=evidence_kind,
                 intent=intent or "user revised the memory",
+                source_refs=[SourceRef.from_dict(item) for item in (source_refs or [])],
+                adoption=adoption,
+                attestation=attestation,
             )
+        )
+
+    def request_confirmation(self, op: str, target_id: str, session_id: str | None = None) -> ProposalResult:
+        """Return a confirmation request without changing any state.
+
+        The MCP surface is model-facing; a destructive or adoption-bearing
+        operation from it must be confirmed by the owner (CLI) or by a hook that
+        observed the user's own message.
+        """
+        if op not in ("forget", "delete", "update", "confirm"):
+            raise ContractError("unsupported confirmation operation")
+        return ProposalResult(
+            update_id=f"conf_{self.revision()}",
+            status="pending_confirmation",
+            memory_id=target_id,
+            revision=self.revision(),
+            message=f"{op} requires the owner; no change was applied",
         )
 
     def confirm(self, candidate_id: str, decision: str = "adopt", session_id: str | None = None) -> ProposalResult:
@@ -477,6 +530,9 @@ class RagService:
         state = self.store.load()
         row = state.updates.get(update_id)
         if row is None:
+            recorded = self.store._recorded_result(update_id)
+            if recorded is not None:
+                return {"update_id": update_id, "revision": state.revision, **recorded["result"]}
             return {"update_id": update_id, "status": "unknown", "revision": state.revision}
         return {"update_id": update_id, **row}
 
@@ -517,6 +573,9 @@ class RagService:
 
     def apply_bundle(self, data: dict[str, Any]) -> int:
         return self.store.apply_bundle(SyncBundle.from_dict(data))
+
+    def record_synced_turn(self, **payload: Any) -> dict[str, Any]:
+        return self.store.record_synced_turn(**payload)
 
     def rebuild_index(self) -> dict[str, object]:
         return self.index.rebuild(self.store.load())

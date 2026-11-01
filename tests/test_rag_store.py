@@ -82,6 +82,7 @@ class MemoryStoreTests(unittest.TestCase):
                 "target_revision": first_revision,
                 "statement": "見た目を最優先する",
                 "evidence_kind": "explicit_statement",
+                "adoption": "owner_operation",
             }
         )
         self.assertEqual(result.status, "conflict")

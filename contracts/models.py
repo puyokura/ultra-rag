@@ -34,6 +34,8 @@ EVIDENCE_KINDS = (
     "imported_statement",
     "extracted",
 )
+ADOPTION_KINDS = ("owner_operation", "user_message")
+KIND_SCOPE_RULES = {"project_decision": ("project",)}
 PROPOSAL_OPS = ("create", "update", "forget", "delete", "confirm")
 PROPOSAL_STATUSES = (
     "adopted",
@@ -45,6 +47,7 @@ PROPOSAL_STATUSES = (
     "rejected",
     "duplicate",
     "unsynced",
+    "pending_confirmation",
 )
 EXEC_STATUSES = ("accepted", "running", "finished", "failed", "stopped", "unknown", "rejected")
 PASSWORD_STATUSES = ("pending", "provided", "expired", "cancelled", "consumed", "failed")
@@ -98,6 +101,7 @@ class MemoryRecord:
     revision: int
     recorded_at: str
     effective_at: str
+    owner_session_id: str | None = None
     conditions: list[str] = field(default_factory=list)
     exceptions: list[str] = field(default_factory=list)
     supersedes: str | None = None
@@ -114,6 +118,13 @@ class MemoryRecord:
             raise ContractError("statement must not be empty")
         if self.scope == "project" and not self.project_id:
             raise ContractError("project scope requires project_id")
+        allowed_scopes = KIND_SCOPE_RULES.get(self.kind)
+        if allowed_scopes and self.scope not in allowed_scopes:
+            raise ContractError(f"{self.kind} requires scope in {allowed_scopes}, got {self.scope!r}")
+        if self.scope == "session" and not self.owner_session_id:
+            raise ContractError("session scope requires owner_session_id")
+        if self.scope != "session" and self.owner_session_id:
+            raise ContractError("only session memories may carry an owner_session_id")
         if self.project_id is not None:
             check_identifier(self.project_id, "project_id")
             if not self.project_id.startswith("proj_"):
@@ -137,6 +148,7 @@ class MemoryRecord:
             "revision": self.revision,
             "recorded_at": self.recorded_at,
             "effective_at": self.effective_at,
+            "owner_session_id": self.owner_session_id,
             "conditions": list(self.conditions),
             "exceptions": list(self.exceptions),
             "supersedes": self.supersedes,
@@ -159,6 +171,7 @@ class MemoryRecord:
             revision=int(data.get("revision", 0)),
             recorded_at=data["recorded_at"],
             effective_at=data.get("effective_at", data["recorded_at"]),
+            owner_session_id=data.get("owner_session_id"),
             conditions=list(data.get("conditions", [])),
             exceptions=list(data.get("exceptions", [])),
             supersedes=data.get("supersedes"),
@@ -201,14 +214,16 @@ class Proposal:
     scope: str | None = None
     project_id: str | None = None
     statement: str | None = None
-    conditions: list[str] = field(default_factory=list)
-    exceptions: list[str] = field(default_factory=list)
+    conditions: list[str] | None = None
+    exceptions: list[str] | None = None
     evidence_kind: str | None = None
     source_refs: list[SourceRef] = field(default_factory=list)
     intent: str | None = None
     target_revision: int | None = None
     confirm: bool = False
     note: str | None = None
+    adoption: str | None = None
+    attestation: dict[str, Any] | None = None
 
     def validate(self) -> "Proposal":
         _require_choice(self.op, PROPOSAL_OPS, "op")
@@ -235,14 +250,44 @@ class Proposal:
                 _require_choice(self.evidence_kind, EVIDENCE_KINDS, "evidence_kind")
             if self.scope == "project" and not self.project_id:
                 raise ContractError("project scope requires project_id")
+            allowed_scopes = KIND_SCOPE_RULES.get(self.kind)
+            if allowed_scopes and self.scope not in allowed_scopes:
+                raise ContractError(f"{self.kind} requires scope in {allowed_scopes}, got {self.scope!r}")
+            if self.scope == "session" and not self.session_id:
+                raise ContractError("session scope requires session_id")
         if self.op == "update":
-            if not (self.statement or self.kind or self.scope or self.conditions or self.exceptions):
+            if not (self.statement or self.kind or self.scope or self.conditions is not None or self.exceptions is not None):
                 raise ContractError("update requires at least one changed field")
         if self.op == "delete" and not self.confirm:
             raise ContractError("delete requires explicit confirmation")
         if self.op == "confirm" and self.note not in (None, "adopt", "reject"):
             raise ContractError("confirm note must be 'adopt', 'reject', or omitted")
+        self._validate_adoption()
         return self
+
+    def _validate_adoption(self) -> None:
+        """Adoption is a host/owner claim, not a model-supplied label.
+
+        A user-message claim must name the observed session message and carry a
+        digest of the exact statement, so the store can check it against the
+        stored excerpts instead of trusting a classification string.
+        """
+        if self.adoption is None:
+            return
+        _require_choice(self.adoption, ADOPTION_KINDS, "adoption")
+        if self.adoption != "user_message":
+            return
+        data = self.attestation or {}
+        if not isinstance(data, dict):
+            raise ContractError("attestation must be an object")
+        if data.get("role") != "user":
+            raise ContractError("user_message adoption must attest a user role")
+        if not data.get("session_id") or not data.get("message_id"):
+            raise ContractError("user_message adoption requires session_id and message_id")
+        if not isinstance(data.get("start"), int) or not isinstance(data.get("end"), int):
+            raise ContractError("user_message adoption requires an integer range")
+        if not data.get("statement_digest"):
+            raise ContractError("user_message adoption requires statement_digest")
 
     def fingerprint(self) -> str:
         payload = self.to_dict()
@@ -261,14 +306,16 @@ class Proposal:
             "scope": self.scope,
             "project_id": self.project_id,
             "statement": self.statement,
-            "conditions": list(self.conditions),
-            "exceptions": list(self.exceptions),
+            "conditions": list(self.conditions) if self.conditions is not None else None,
+            "exceptions": list(self.exceptions) if self.exceptions is not None else None,
             "evidence_kind": self.evidence_kind,
             "source_refs": [ref.to_dict() for ref in self.source_refs],
             "intent": self.intent,
             "target_revision": self.target_revision,
             "confirm": self.confirm,
             "note": self.note,
+            "adoption": self.adoption,
+            "attestation": self.attestation,
         }
 
     @classmethod
@@ -284,14 +331,16 @@ class Proposal:
             scope=data.get("scope"),
             project_id=data.get("project_id"),
             statement=data.get("statement"),
-            conditions=list(data.get("conditions", [])),
-            exceptions=list(data.get("exceptions", [])),
+            conditions=list(data["conditions"]) if data.get("conditions") is not None else None,
+            exceptions=list(data["exceptions"]) if data.get("exceptions") is not None else None,
             evidence_kind=data.get("evidence_kind"),
             source_refs=[SourceRef.from_dict(item) for item in data.get("source_refs", [])],
             intent=data.get("intent"),
             target_revision=data.get("target_revision"),
             confirm=bool(data.get("confirm", False)),
             note=data.get("note"),
+            adoption=data.get("adoption"),
+            attestation=data.get("attestation"),
         ).validate()
 
 

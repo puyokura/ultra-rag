@@ -58,6 +58,15 @@ def fingerprint_of_public_key(key_type: str, key_b64: str) -> str:
     return f"SHA256:{digest}"
 
 
+# The askpass helper must not pass the password through cmd's expansion:
+# metacharacters (& | < > ^) would be reinterpreted. PowerShell reads the
+# environment variable directly, so the value is written verbatim.
+_ASKPASS_CMD = (
+    "@echo off\r\n"
+    'powershell -NoProfile -Command "[Console]::Out.WriteLine($env:ULTRA_RAG_SSH_PASSWORD)"\r\n'
+)
+
+
 class PasswordBroker:
     def __init__(self, layout: Layout, config: dict | None = None):
         self.layout = layout
@@ -115,6 +124,27 @@ class PasswordBroker:
             data["requests"][request.id] = request.to_dict()
             self._write(data)
 
+    def _claim(self, request_id: str, new_status: str) -> PasswordRequest:
+        """Atomically move a pending request to its consuming status.
+
+        Two terminals (or two retries) must not both answer the same request;
+        the check and the write happen under one lock.
+        """
+        with write_lock(self.lock_file, 10):
+            data = self._read()
+            row = data["requests"].get(request_id)
+            if not row:
+                raise PasswordError("password request not found")
+            request = self._expire(PasswordRequest.from_dict(row))
+            if request.status != "pending":
+                data["requests"][request.id] = request.to_dict()
+                self._write(data)
+                raise PasswordError(f"request is {request.status}; a new request is required")
+            request.status = new_status
+            data["requests"][request.id] = request.to_dict()
+            self._write(data)
+            return request
+
     def create_request(
         self,
         host: str,
@@ -131,6 +161,8 @@ class PasswordBroker:
             raise PasswordError("adapter must be sudo or ssh")
         if not host.strip() or not account.strip() or not command.strip():
             raise PasswordError("host, account, and command are required")
+        if adapter == "sudo" and host.strip().lower() not in ("local", "localhost", "127.0.0.1"):
+            raise PasswordError("the sudo adapter runs on this machine; host must be local")
         if not exec_id:
             raise PasswordError("exec_id is required to bind the request to one terminal execution")
         check_identifier(exec_id, "exec_id")
@@ -400,9 +432,9 @@ class PasswordBroker:
         selected_host_key = None
         if request.adapter == "ssh":
             selected_host_key = self.select_host_key(request.host, request.port, request.host_key_fingerprint)
-        # One-time binding: mark before invoking so a crash cannot permit replay.
-        request.status = "provided"
-        self._save(request)
+        # One-time binding: claim before invoking so a crash or a second
+        # terminal cannot permit replay.
+        request = self._claim(request.id, "provided")
         try:
             if request.adapter == "sudo":
                 result = self._run_sudo(request, password, executable, timeout)
@@ -424,14 +456,33 @@ class PasswordBroker:
         base = executable or ([shutil.which("sudo") or "sudo"])
         command = list(base) + ["-S", "-p", "", "/bin/sh", "-c", request.command]
         try:
-            result = subprocess.run(
-                command,
-                input=password + "\n",
+            # If sudo would not ask for a password (cached credential or
+            # NOPASSWD), sending it on stdin hands the value to the command.
+            probe = subprocess.run(
+                list(base) + ["-n", "true"],
                 capture_output=True,
                 text=True,
-                timeout=timeout,
+                timeout=min(timeout, 10.0),
                 check=False,
             )
+            if probe.returncode == 0:
+                result = subprocess.run(
+                    command,
+                    stdin=subprocess.DEVNULL,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                    check=False,
+                )
+            else:
+                result = subprocess.run(
+                    command,
+                    input=password + "\n",
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                    check=False,
+                )
         except subprocess.TimeoutExpired:
             return {"ok": False, "status": "failed", "diagnostic": "timeout", "exit_code": None}
         text = (result.stdout or "") + "\n" + (result.stderr or "")
@@ -467,13 +518,15 @@ class PasswordBroker:
         helper = helper_dir / ("askpass.cmd" if os.name == "nt" else "askpass.sh")
         try:
             if os.name == "nt":
-                helper.write_text("@echo off\r\necho %ULTRA_RAG_SSH_PASSWORD%\r\n", encoding="utf-8")
+                helper.write_text(_ASKPASS_CMD, encoding="utf-8")
             else:
                 helper.write_text('#!/bin/sh\nprintf \'%s\\n\' "$ULTRA_RAG_SSH_PASSWORD"\n', encoding="utf-8")
                 os.chmod(helper, 0o700)
             base = executable or ([shutil.which("ssh") or "ssh"])
             host_key_options: list[str] = []
             known_hosts_path = self.known_hosts
+            empty_known_hosts = helper_dir / "known_hosts.empty"
+            empty_known_hosts.write_text("", encoding="utf-8")
             if selected_host_key and selected_host_key.get("key_type"):
                 host_key_options = ["-o", f"HostKeyAlgorithms={selected_host_key['key_type']}"]
                 selected_hosts = helper_dir / "known_hosts.selected"
@@ -497,6 +550,10 @@ class PasswordBroker:
                 *host_key_options,
                 "-o",
                 f"UserKnownHostsFile={known_hosts_path}",
+                "-o",
+                f"GlobalKnownHostsFile={empty_known_hosts}",
+                "-o",
+                "UpdateHostKeys=no",
                 "-o",
                 "ConnectTimeout=10",
                 "-p",

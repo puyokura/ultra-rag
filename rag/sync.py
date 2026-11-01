@@ -151,8 +151,8 @@ def sync_push(layout: Layout, remote: str, token: str) -> dict[str, Any]:
                 if isinstance(assistant, dict):
                     body.setdefault("assistant_text", assistant.get("text", ""))
                     body.setdefault("assistant_message_id", assistant.get("message_id"))
-                client.post("/v1/turn", body)
-                result = {"status": "adopted"}
+                response = client.post("/v1/turn", body)
+                result = {"status": "adopted" if response.get("saved", True) else "rejected"}
             else:
                 rejected += 1
                 continue

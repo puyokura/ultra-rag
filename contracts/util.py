@@ -14,6 +14,7 @@ import os
 import re
 import secrets
 import threading
+import time
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -93,6 +94,27 @@ def _restrict(path: Path) -> None:
             pass
 
 
+def _publish(tmp: Path, path: Path) -> None:
+    """Replace ``path`` with the fully written ``tmp`` file.
+
+    Windows refuses to replace a file that another process currently has open
+    without delete sharing (``MoveFileEx`` needs DELETE access to the target).
+    Readers such as the execution monitor poll control files on a short
+    interval, so an in-flight read must not turn a durable state write into a
+    spurious failure. The retry is bounded; a persistent conflict is still
+    reported to the caller.
+    """
+    attempts = 6 if os.name == "nt" else 1
+    for attempt in range(attempts):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(0.02 * (attempt + 1))
+
+
 def atomic_write_bytes(path: Path, data: bytes, mode: int = 0o600) -> None:
     ensure_dir(path.parent)
     tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}-{secrets.token_hex(4)}")
@@ -102,7 +124,7 @@ def atomic_write_bytes(path: Path, data: bytes, mode: int = 0o600) -> None:
             handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(tmp, path)
+        _publish(tmp, path)
         _restrict(path)
     finally:
         if tmp.exists():
@@ -114,6 +136,55 @@ def atomic_write_bytes(path: Path, data: bytes, mode: int = 0o600) -> None:
 
 def atomic_write_text(path: Path, text: str, mode: int = 0o600) -> None:
     atomic_write_bytes(path, text.encode("utf-8"), mode=mode)
+
+
+def write_once_bytes(path: Path, data: bytes, mode: int = 0o600) -> bool:
+    """Create ``path`` only when it does not exist yet; return whether it is new.
+
+    A control file that another process polls (an execution stop request) must
+    never be replaced: on Windows an atomic replace of a file a reader holds
+    open fails, and a second writer would also rewrite the recorded reason.
+    The first writer wins and the value is immutable afterwards.
+
+    The content is published through a hard link so a reader never observes a
+    partially written file.
+    """
+    ensure_dir(path.parent)
+    tmp = path.with_name(f".{path.name}.once-{os.getpid()}-{secrets.token_hex(4)}")
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.link(tmp, path)
+            return True
+        except FileExistsError:
+            return False
+        except OSError:
+            pass
+        try:
+            target = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), mode)
+        except FileExistsError:
+            return False
+        with os.fdopen(target, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        _restrict(path)
+        return True
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+
+
+def write_once_json(path: Path, value: Any, mode: int = 0o600) -> bool:
+    text = json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    return write_once_bytes(path, text.encode("utf-8"), mode=mode)
 
 
 def read_json(path: Path, default: Any = None) -> Any:
