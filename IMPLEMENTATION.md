@@ -484,3 +484,11 @@ SSH 接続先 `agent`（Debian 13、Python 3.13.5、systemd user、systemd-creds
 - 実測（Debian）: 201 tests OK（2 skip）。100文書の索引構築29.2秒、クエリ5回は395〜431ms、常駐RSS 1.9GB。1000文書は298.4秒・2.93MiB。Python 3.13.5、torch 2.15.0+cu132、sentence-transformers 6.2.0。
 - 品質評価（Issue #37）: 30文書・自然文30問でRecall@1 1.000（literal 0.000）、キーワード30問で0.933（literal 1.000）。PCの1000件索引は38.3秒・2.93MiB、クエリ92.7ms。
 - 未検証: 長文・抜粋混在時の品質、実セッションデータでの評価。既定はオフのままで、本番の検索経路はliteralのまま。
+
+
+## 23. v0.1.2 公開（2026-11-01）
+
+- `pyproject.toml` を 0.1.2 へ更新。`numpy` を必須依存に追加し、`sentence-transformers` / `torch` は任意とした。
+- 実装: ruri-v3-310mによる任意の意味検索（既定オフ）、増分索引、RRF融合、literalフォールバック、CLI `rag embed-index`。
+- 文書: README 7.2.1、architecture 7.3・27章、本書22章を実装と実測に合わせて更新。
+- 実装commit `95c332d`。CI（3.11/3.12/3.13）成功。タグ `v0.1.2` は本書更新後のHEADに付ける。
