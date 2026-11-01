@@ -21,7 +21,7 @@ from contracts.util import (
     write_json,
     write_lock,
 )
-from rag.profile import applicable_constraints, render_constraints, render_profile
+from rag.profile import applicable_constraints, render_constraints, render_core_profile, render_profile
 from rag.search import SearchIndex
 from rag.store import MemoryStore
 
@@ -70,17 +70,42 @@ class RagService:
         query: str = "",
         session_id: str | None = None,
         related_limit: int = 8,
+        include_lessons: bool | None = None,
+        include_related: bool | None = None,
+        include_pending: bool | None = None,
     ) -> dict[str, Any]:
+        rag_config = self.config.get("rag", {})
+        if include_lessons is None:
+            include_lessons = bool(rag_config.get("inject_lessons", False))
+        if include_related is None:
+            include_related = bool(rag_config.get("inject_related", False))
+        if include_pending is None:
+            include_pending = bool(rag_config.get("inject_pending", False))
         if session_id:
             check_identifier(session_id, "session_id")
         related_limit = max(1, min(int(related_limit), 50))
         state = self.store.load()
         # The profile is composed from the adopted records on every request;
         # the Markdown file is an artifact, never an injection source.
-        profile_text = render_profile(list(state.memories.values()), state.revision)
-        constraints = applicable_constraints(list(state.memories.values()), project_id)
+        all_records = list(state.memories.values())
+        profile_text = render_profile(all_records, state.revision)
+        core_profile_text = render_core_profile(all_records, state.revision)
+        lessons = [
+            record
+            for record in all_records
+            if record.kind == "lesson" and record.status == "adopted" and record.autoload
+        ]
+        lessons_text = ""
+        if include_lessons and lessons:
+            rendered = render_profile(lessons, state.revision)
+            lessons_text = "## 共通の教訓\n\n" + rendered.split("## 共通の教訓", 1)[-1].lstrip("\n")
+        constraints = applicable_constraints(all_records, project_id)
         constraints_text = render_constraints(constraints, state.revision)
-        related = self.index.search(query, project_id, limit=related_limit) if query.strip() else []
+        related = (
+            self.index.search(query, project_id, limit=related_limit)
+            if query.strip() and include_related
+            else []
+        )
         pending = [
             record
             for record in state.memories.values()
@@ -130,7 +155,15 @@ class RagService:
                         )
                 self._mark_seen(session_id, state.revision)
         context = self._context_text(
-            state.revision, profile_text, constraints_text, related, pending, notifications
+            state.revision,
+            core_profile_text,
+            constraints_text,
+            related,
+            pending if include_pending else [],
+            notifications,
+            lessons_text=lessons_text,
+            lessons_count=len(lessons),
+            pending_count=len(pending),
         )
         max_context_chars = int(self.config.get("rag", {}).get("max_context_chars", 120000))
         overflow = len(context) > max_context_chars
@@ -138,7 +171,13 @@ class RagService:
             "revision": state.revision,
             "project_id": project_id,
             "profile": profile_text,
+            "core_profile": core_profile_text,
             "constraints": constraints_text,
+            "lessons_count": len(lessons),
+            "lessons_text": lessons_text,
+            "injected_lessons": include_lessons,
+            "injected_related": include_related,
+            "injected_pending": include_pending,
             "related": [hit.to_dict() for hit in related],
             "pending": [
                 {
@@ -150,6 +189,7 @@ class RagService:
                 }
                 for record in pending
             ],
+            "pending_count": len(pending),
             "notifications": notifications,
             "seen_revision": seen,
             "context_text": context,
@@ -173,6 +213,9 @@ class RagService:
         related: list[SearchHit],
         pending: list[MemoryRecord],
         notifications: list[str],
+        lessons_text: str = "",
+        lessons_count: int = 0,
+        pending_count: int = 0,
     ) -> str:
         lines = [
             f"[ultra-RAG memory: revision {revision}]",
@@ -183,6 +226,9 @@ class RagService:
             constraints_text.rstrip(),
             "",
         ]
+        if lessons_text:
+            lines.append(lessons_text.rstrip())
+            lines.append("")
         if related:
             lines.append("## 関連する個人メモリ・共通の教訓・現在案件の記憶")
             lines.append("")
@@ -206,6 +252,9 @@ class RagService:
             for line in notifications:
                 lines.append(f"- {line}")
             lines.append("")
+        lines.append(
+            f"必要時: 教訓{lessons_count}件は memory_search、確認待ち{pending_count}件は memory_candidates で取得する（常時注入しない）。"
+        )
         return "\n".join(lines).rstrip() + "\n"
 
     # ---------------------------------------------------------------- searches
@@ -410,6 +459,7 @@ class RagService:
         evidence_kind: str = "explicit_statement",
         session_id: str | None = None,
         source_refs: list[dict[str, Any]] | None = None,
+        activity: dict[str, Any] | None = None,
         intent: str | None = None,
         adoption: str | None = "owner_operation",
         attestation: dict[str, Any] | None = None,
@@ -425,6 +475,7 @@ class RagService:
             statement=statement,
             conditions=conditions,
             exceptions=exceptions,
+            activity=activity,
             evidence_kind=evidence_kind,
             source_refs=[SourceRef.from_dict(item) for item in (source_refs or [])],
             intent=intent,
@@ -475,6 +526,7 @@ class RagService:
         session_id: str | None = None,
         intent: str | None = None,
         source_refs: list[dict[str, Any]] | None = None,
+        activity: dict[str, Any] | None = None,
         adoption: str | None = "owner_operation",
         attestation: dict[str, Any] | None = None,
     ) -> ProposalResult:
@@ -489,6 +541,7 @@ class RagService:
                 statement=statement,
                 conditions=conditions,
                 exceptions=exceptions,
+                activity=activity,
                 evidence_kind=evidence_kind,
                 intent=intent or "user revised the memory",
                 source_refs=[SourceRef.from_dict(item) for item in (source_refs or [])],

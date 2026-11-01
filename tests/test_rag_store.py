@@ -35,7 +35,7 @@ class MemoryStoreTests(unittest.TestCase):
         requirement = self.service.remember("必ず実プロセスで検証する", kind="requirement")
         self.assertEqual(principle.status, "adopted")
         self.assertEqual(requirement.status, "adopted")
-        snapshot = self.service.snapshot(query="実測")
+        snapshot = self.service.snapshot(query="実測", include_related=True)
         self.assertIn("実測を設計より優先する", snapshot["profile"])
         self.assertIn("必ず実プロセスで検証する", snapshot["constraints"])
         self.assertIn("実測を設計より優先する", snapshot["context_text"])
@@ -45,7 +45,7 @@ class MemoryStoreTests(unittest.TestCase):
     def test_inferred_memory_is_a_candidate_not_policy(self) -> None:
         result = self.service.remember("たぶん簡潔な回答が好き", evidence_kind="extracted")
         self.assertEqual(result.status, "pending")
-        snapshot = self.service.snapshot()
+        snapshot = self.service.snapshot(include_pending=True)
         self.assertNotIn("たぶん簡潔な回答が好き", snapshot["profile"])
         self.assertNotIn("たぶん簡潔な回答が好き", snapshot["constraints"])
         self.assertIn("たぶん簡潔な回答が好き", snapshot["context_text"])

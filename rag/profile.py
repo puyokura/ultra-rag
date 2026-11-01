@@ -21,6 +21,7 @@ KIND_TITLES = {
     "project_decision": "プロジェクトの決定",
 }
 CONSTRAINT_KINDS = ("prohibition", "requirement")
+CORE_KINDS = ("philosophy", "design_principle", "preference")
 
 
 def _applicable(records: list[MemoryRecord]) -> list[MemoryRecord]:
@@ -201,6 +202,11 @@ def applicable_constraints(records: list[MemoryRecord], project_id: str | None) 
             continue
         result.append(record)
     return sorted(result, key=lambda item: (item.kind, item.scope, item.project_id or "", item.id))
+
+
+def render_core_profile(records: list[MemoryRecord], revision: int) -> str:
+    """Only the kinds injected on every request; lessons are fetched on demand."""
+    return render_profile([record for record in records if record.kind in CORE_KINDS], revision)
 
 
 def profile_memories(records: list[MemoryRecord]) -> list[MemoryRecord]:

@@ -165,6 +165,7 @@ def _project_for(args: argparse.Namespace, scope: str) -> str | None:
 
 def cmd_rag_remember(args: argparse.Namespace) -> int:
     project_id = _project_for(args, args.scope)
+    activity = json.loads(args.activity_json) if args.activity_json else None
     result = _service(args).remember(
         statement=args.statement,
         kind=args.kind,
@@ -172,6 +173,7 @@ def cmd_rag_remember(args: argparse.Namespace) -> int:
         project_id=project_id,
         conditions=args.condition,
         exceptions=args.exception,
+        activity=activity,
         evidence_kind=args.evidence,
         session_id=args.session_id or None,
     )
@@ -743,6 +745,7 @@ def build_parser() -> argparse.ArgumentParser:
     remember.add_argument("--exception", action="append", default=[])
     remember.add_argument("--evidence", default="explicit_statement")
     remember.add_argument("--session-id")
+    remember.add_argument("--activity-json", default=None)
     remember.set_defaults(func=cmd_rag_remember)
     update = rag_sub.add_parser("update")
     update.add_argument("memory_id")

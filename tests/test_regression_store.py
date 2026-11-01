@@ -356,19 +356,59 @@ class ActivitySummaryTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp.cleanup()
 
+    def valid_activity(self) -> dict:
+        return {
+            "date": "2026-11-01",
+            "overview": "今日はUIを追加した。",
+            "achievements": ["記憶ブラウザを追加"],
+            "decisions": ["LAN限定で認証なし"],
+            "remaining": ["ページング"],
+        }
+
     def test_activity_summary_is_adopted_and_not_injected(self) -> None:
         result = self.service.remember(
             "【活動記録】今日はUIを追加した。",
             kind="activity_summary",
+            activity=self.valid_activity(),
             adoption="activity_summary",
         )
         self.assertEqual(result.status, "adopted")
         stored = self.service.get_memory(result.memory_id)
         self.assertFalse(stored["autoload"])
+        self.assertEqual(stored["activity"]["date"], "2026-11-01")
+        self.assertEqual(stored["activity"]["remaining"], ["ページング"])
         snapshot = self.service.snapshot()
         self.assertNotIn("今日はUIを追加した", snapshot["profile"])
         self.assertNotIn("今日はUIを追加した", snapshot["constraints"])
-        self.assertEqual(self.service.search("UIを追加"), [])
+        # #36: activity records are searchable even though they are not injected.
+        hits = self.service.search("今日はUIを追加した")
+        self.assertTrue(any(hit["memory_id"] == result.memory_id for hit in hits))
+
+    def test_activity_requires_structured_fields(self) -> None:
+        with self.assertRaises(ContractError):
+            self.service.remember(
+                "構造化なしの活動記録",
+                kind="activity_summary",
+                adoption="activity_summary",
+            )
+        with self.assertRaises(ContractError):
+            self.service.remember(
+                "概要だけの活動記録",
+                kind="activity_summary",
+                activity={"date": "2026-11-01", "overview": "概要"},
+                adoption="activity_summary",
+            )
+        with self.assertRaises(ContractError):
+            self.service.remember(
+                "日付なしの活動記録",
+                kind="activity_summary",
+                activity={"overview": "概要", "achievements": ["a"]},
+                adoption="activity_summary",
+            )
+
+    def test_activity_fields_are_rejected_for_other_kinds(self) -> None:
+        with self.assertRaises(ContractError):
+            self.service.remember("通常の好み", kind="preference", activity=self.valid_activity())
 
     def test_activity_claim_does_not_adopt_other_kinds(self) -> None:
         result = self.service.remember(

@@ -8,6 +8,7 @@ password value back to a model.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field, fields
 from typing import Any, Iterable, Literal
 
@@ -58,6 +59,35 @@ class ContractError(ValueError):
     """A value violates the published contract."""
 
 
+ACTIVITY_KEYS = ("date", "overview", "achievements", "decisions", "remaining")
+
+
+def validate_activity(activity: Any) -> dict[str, Any]:
+    """Validate the structured fields of an activity summary.
+
+    The fields are required so an activity record cannot degrade into an
+    unsearchable log line. Unknown keys are rejected instead of stored.
+    """
+    if not isinstance(activity, dict):
+        raise ContractError("activity must be an object")
+    unknown = set(activity) - set(ACTIVITY_KEYS)
+    if unknown:
+        raise ContractError(f"activity has unknown fields: {sorted(unknown)}")
+    date = activity.get("date")
+    if not isinstance(date, str) or not re.match(r"^\d{4}-\d{2}-\d{2}$", date):
+        raise ContractError("activity.date must be YYYY-MM-DD")
+    overview = activity.get("overview")
+    if not isinstance(overview, str) or not overview.strip():
+        raise ContractError("activity.overview must not be empty")
+    for key in ("achievements", "decisions", "remaining"):
+        values = activity.get(key, [])
+        if not isinstance(values, list) or any(not isinstance(item, str) for item in values):
+            raise ContractError(f"activity.{key} must be a list of strings")
+    if not any(activity.get(key) for key in ("achievements", "decisions", "remaining")):
+        raise ContractError("activity requires at least one of achievements, decisions, or remaining")
+    return activity
+
+
 def _require_choice(value: str, choices: Iterable[str], field_name: str) -> str:
     allowed = tuple(choices)
     if value not in allowed:
@@ -105,6 +135,7 @@ class MemoryRecord:
     owner_session_id: str | None = None
     conditions: list[str] = field(default_factory=list)
     exceptions: list[str] = field(default_factory=list)
+    activity: dict[str, Any] | None = None
     supersedes: str | None = None
     autoload: bool = True
     origin: str = "conversation"
@@ -126,6 +157,12 @@ class MemoryRecord:
             raise ContractError("session scope requires owner_session_id")
         if self.scope != "session" and self.owner_session_id:
             raise ContractError("only session memories may carry an owner_session_id")
+        if self.activity is not None:
+            if self.kind != "activity_summary":
+                raise ContractError("only activity_summary records may carry activity fields")
+            validate_activity(self.activity)
+        # Legacy activity records created before the structured schema stay
+        # readable; the create/update path requires the fields via Proposal.
         if self.project_id is not None:
             check_identifier(self.project_id, "project_id")
             if not self.project_id.startswith("proj_"):
@@ -152,6 +189,7 @@ class MemoryRecord:
             "owner_session_id": self.owner_session_id,
             "conditions": list(self.conditions),
             "exceptions": list(self.exceptions),
+            "activity": self.activity,
             "supersedes": self.supersedes,
             "autoload": self.autoload,
             "origin": self.origin,
@@ -175,6 +213,7 @@ class MemoryRecord:
             owner_session_id=data.get("owner_session_id"),
             conditions=list(data.get("conditions", [])),
             exceptions=list(data.get("exceptions", [])),
+            activity=data.get("activity"),
             supersedes=data.get("supersedes"),
             autoload=bool(data.get("autoload", True)),
             origin=data.get("origin", "conversation"),
@@ -217,6 +256,7 @@ class Proposal:
     statement: str | None = None
     conditions: list[str] | None = None
     exceptions: list[str] | None = None
+    activity: dict[str, Any] | None = None
     evidence_kind: str | None = None
     source_refs: list[SourceRef] = field(default_factory=list)
     intent: str | None = None
@@ -256,9 +296,22 @@ class Proposal:
                 raise ContractError(f"{self.kind} requires scope in {allowed_scopes}, got {self.scope!r}")
             if self.scope == "session" and not self.session_id:
                 raise ContractError("session scope requires session_id")
+            if self.kind == "activity_summary":
+                validate_activity(self.activity)
+            elif self.activity is not None:
+                raise ContractError("only activity_summary records may carry activity fields")
         if self.op == "update":
-            if not (self.statement or self.kind or self.scope or self.conditions is not None or self.exceptions is not None):
+            if not (
+                self.statement
+                or self.kind
+                or self.scope
+                or self.conditions is not None
+                or self.exceptions is not None
+                or self.activity is not None
+            ):
                 raise ContractError("update requires at least one changed field")
+            if self.activity is not None:
+                validate_activity(self.activity)
         if self.op == "delete" and not self.confirm:
             raise ContractError("delete requires explicit confirmation")
         if self.op == "confirm" and self.note not in (None, "adopt", "reject"):
@@ -309,6 +362,7 @@ class Proposal:
             "statement": self.statement,
             "conditions": list(self.conditions) if self.conditions is not None else None,
             "exceptions": list(self.exceptions) if self.exceptions is not None else None,
+            "activity": self.activity,
             "evidence_kind": self.evidence_kind,
             "source_refs": [ref.to_dict() for ref in self.source_refs],
             "intent": self.intent,
@@ -334,6 +388,7 @@ class Proposal:
             statement=data.get("statement"),
             conditions=list(data["conditions"]) if data.get("conditions") is not None else None,
             exceptions=list(data["exceptions"]) if data.get("exceptions") is not None else None,
+            activity=data.get("activity"),
             evidence_kind=data.get("evidence_kind"),
             source_refs=[SourceRef.from_dict(item) for item in data.get("source_refs", [])],
             intent=data.get("intent"),
@@ -378,6 +433,12 @@ class SearchHit:
     conditions: list[str] = field(default_factory=list)
     exceptions: list[str] = field(default_factory=list)
     source_refs: list[SourceRef] = field(default_factory=list)
+    hit_type: str = "memory"
+    excerpt_id: str | None = None
+    session_id: str | None = None
+    message_id: str | None = None
+    start: int | None = None
+    end: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -392,6 +453,12 @@ class SearchHit:
             "conditions": self.conditions,
             "exceptions": self.exceptions,
             "source_refs": [ref.to_dict() for ref in self.source_refs],
+            "hit_type": self.hit_type,
+            "excerpt_id": self.excerpt_id,
+            "session_id": self.session_id,
+            "message_id": self.message_id,
+            "start": self.start,
+            "end": self.end,
         }
 
 

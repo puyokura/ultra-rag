@@ -15,7 +15,7 @@ import sqlite3
 from pathlib import Path
 
 from contracts.models import SearchHit
-from contracts.util import ensure_dir, write_lock
+from contracts.util import canonical_json, ensure_dir, sha256_hex, write_lock
 from rag.store import MemoryStore, RevisionState
 
 SCHEMA = """
@@ -34,6 +34,23 @@ CREATE TABLE IF NOT EXISTS memories (
   source_refs TEXT NOT NULL DEFAULT '[]'
 );
 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+  id UNINDEXED,
+  text,
+  tokenize='trigram'
+);
+CREATE TABLE IF NOT EXISTS excerpts (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  project_id TEXT,
+  message_id TEXT,
+  role TEXT NOT NULL,
+  start INTEGER NOT NULL,
+  end INTEGER NOT NULL,
+  turn INTEGER,
+  text TEXT NOT NULL,
+  recorded_at TEXT
+);
+CREATE VIRTUAL TABLE IF NOT EXISTS excerpts_fts USING fts5(
   id UNINDEXED,
   text,
   tokenize='trigram'
@@ -70,7 +87,10 @@ class SearchIndex:
                 connection.execute("BEGIN IMMEDIATE")
                 connection.execute("DELETE FROM memories")
                 connection.execute("DELETE FROM memories_fts")
+                connection.execute("DELETE FROM excerpts")
+                connection.execute("DELETE FROM excerpts_fts")
                 count = 0
+                excerpt_count = 0
                 for record in state.memories.values():
                     if record.status in ("deleted",):
                         continue
@@ -97,13 +117,36 @@ class SearchIndex:
                         (record.id, text),
                     )
                     count += 1
+                for session in state.sessions.values():
+                    for excerpt in session.excerpts:
+                        connection.execute(
+                            "INSERT INTO excerpts(id, session_id, project_id, message_id, role, start, end, turn, text, recorded_at) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            (
+                                excerpt.id,
+                                excerpt.session_id,
+                                session.project_id,
+                                excerpt.message_id,
+                                excerpt.role,
+                                excerpt.start,
+                                excerpt.end,
+                                excerpt.turn,
+                                excerpt.text,
+                                excerpt.recorded_at,
+                            ),
+                        )
+                        connection.execute(
+                            "INSERT INTO excerpts_fts(id, text) VALUES (?, ?)",
+                            (excerpt.id, excerpt.text),
+                        )
+                        excerpt_count += 1
                 connection.execute(
                     "INSERT INTO meta(key, value) VALUES ('revision', ?) "
                     "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                     (str(state.revision),),
                 )
                 connection.commit()
-                return {"revision": state.revision, "records": count}
+                return {"revision": state.revision, "records": count, "excerpts": excerpt_count}
             except Exception:
                 connection.rollback()
                 raise
@@ -144,6 +187,7 @@ class SearchIndex:
         rows = self._query_rows(text, project_id, allowed_scopes, include_pending, max(limit * 4, 16))
         hits: list[SearchHit] = []
         seen: set[str] = set()
+        include_excerpts = session_id is not None and (scopes is None or "session" in scopes)
         for row in rows:
             memory = state.memories.get(row["id"])
             if memory is None:
@@ -155,7 +199,7 @@ class SearchIndex:
             if include_pending:
                 if memory.status not in ("adopted", "pending", "conflict"):
                     continue
-            elif memory.status != "adopted" or not memory.autoload:
+            elif memory.status != "adopted":
                 continue
             if memory.scope == "project" and memory.project_id != project_id:
                 continue
@@ -182,7 +226,77 @@ class SearchIndex:
             )
             if len(hits) >= limit:
                 break
+        if include_excerpts and len(hits) < limit:
+            blocked = set()
+            for tombstone in state.tombstones:
+                for fingerprint in tombstone.get("source_fingerprints", []):
+                    blocked.add(fingerprint)
+            for row in self._excerpt_rows(text, session_id, project_id, max(limit * 4, 16)):
+                excerpt_id = row["id"]
+                fingerprint = sha256_hex(
+                    canonical_json(
+                        {
+                            "session_id": row["session_id"],
+                            "message_id": row["message_id"],
+                            "start": row["start"],
+                            "end": row["end"],
+                        }
+                    )
+                )
+                if fingerprint in blocked:
+                    continue
+                hits.append(
+                    SearchHit(
+                        memory_id="",
+                        statement=row["text"],
+                        kind="excerpt",
+                        scope="session",
+                        project_id=row["project_id"],
+                        status="adopted",
+                        revision=state.revision,
+                        score=float(row["score"]) if row["score"] is not None else 0.0,
+                        hit_type="excerpt",
+                        excerpt_id=excerpt_id,
+                        session_id=row["session_id"],
+                        message_id=row["message_id"],
+                        start=row["start"],
+                        end=row["end"],
+                    )
+                )
+                if len(hits) >= limit:
+                    break
         return hits
+
+    def _excerpt_rows(
+        self, text: str, session_id: str, project_id: str | None, limit: int
+    ) -> list[sqlite3.Row]:
+        connection = self._connect()
+        try:
+            project_clause = ""
+            params: list[object] = [session_id]
+            if project_id:
+                project_clause = " AND (e.project_id = ? OR e.project_id IS NULL)"
+                params.append(project_id)
+            sql = (
+                "SELECT e.id, e.session_id, e.project_id, e.message_id, e.start, e.end, e.text, bm25(excerpts_fts) AS score "
+                "FROM excerpts_fts JOIN excerpts e ON e.id = excerpts_fts.id "
+                f"WHERE e.session_id = ?{project_clause} AND excerpts_fts MATCH ? ORDER BY score LIMIT ?"
+            )
+            rows: list[sqlite3.Row] = []
+            try:
+                rows = list(connection.execute(sql, (*params, _fts_quote(text), limit)).fetchall())
+            except sqlite3.OperationalError:
+                rows = []
+            if not rows:
+                like_sql = (
+                    "SELECT e.id, e.session_id, e.project_id, e.message_id, e.start, e.end, e.text, 0.0 AS score "
+                    f"FROM excerpts e WHERE e.session_id = ?{project_clause} AND e.text LIKE ? LIMIT ?"
+                )
+                pattern = f"%{text}%"
+                rows = list(connection.execute(like_sql, (*params, pattern, limit)).fetchall())
+            return rows
+        finally:
+            connection.close()
 
     def _query_rows(
         self,
@@ -208,7 +322,7 @@ class SearchIndex:
                 "SELECT m.id, bm25(memories_fts) AS score FROM memories_fts "
                 "JOIN memories m ON m.id = memories_fts.id "
                 f"WHERE m.status IN ({placeholders}) AND m.scope IN ({scope_placeholders}) "
-                f"{project_clause} AND m.autoload = 1 "
+                f"{project_clause} "
                 "AND memories_fts MATCH ? ORDER BY score LIMIT ?"
             )
             rows: list[sqlite3.Row] = []
@@ -231,7 +345,7 @@ class SearchIndex:
                 like_sql = (
                     "SELECT m.id, 0.0 AS score FROM memories m "
                     f"WHERE m.status IN ({placeholders}) AND m.scope IN ({scope_placeholders}) "
-                    f"{project_clause} AND m.autoload = 1 AND "
+                    f"{project_clause} AND "
                     "(m.statement LIKE ? OR m.conditions LIKE ? OR m.exceptions LIKE ?) "
                     "LIMIT ?"
                 )

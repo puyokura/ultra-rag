@@ -154,8 +154,8 @@ def pre_step(home: str | None, payload: dict[str, Any]) -> dict[str, Any]:
     related = result.get("related", [])
     pending = result.get("pending", [])
     summary = (
-        f"ultra-RAG revision {result['revision']} · related {len(related)} · "
-        f"pending {len(pending)} · role {config.get('role')}"
+        f"ultra-RAG revision {result['revision']} · lessons {result.get('lessons_count', 0)} · "
+        f"pending {result.get('pending_count', 0)} · role {config.get('role')}"
     )
     return {
         "ok": True,
@@ -164,7 +164,8 @@ def pre_step(home: str | None, payload: dict[str, Any]) -> dict[str, Any]:
         "summary": summary,
         "context_text": result["context_text"],
         "related_count": len(related),
-        "pending_count": len(pending),
+        "lessons_count": result.get("lessons_count", 0),
+        "pending_count": result.get("pending_count", 0),
         "notifications": result.get("notifications", []),
         "context_chars": result.get("context_chars"),
         "max_context_chars": result.get("max_context_chars"),

@@ -133,14 +133,25 @@ class MCPServerTests(unittest.TestCase):
         self.assertIn("実測を最優先する", snapshot["context_text"])
         search = self.client.call("memory_search", {"query": "実測"})
         self.assertTrue(search["results"])
-        # Only activity records are adopted without owner confirmation.
         activity = self.client.call(
             "memory_remember",
-            {"statement": "【活動記録】テスト実行", "kind": "activity_summary"},
+            {
+                "statement": "【活動記録】MCP確認",
+                "kind": "activity_summary",
+                "activity": {
+                    "date": "2026-11-01",
+                    "overview": "MCP経由の活動記録",
+                    "achievements": ["構造化保存"],
+                    "decisions": [],
+                    "remaining": [],
+                },
+            },
         )
         self.assertEqual(activity["status"], "adopted")
+        stored = self.client.call("memory_get", {"memory_id": activity["memory_id"]})
+        self.assertEqual(stored["activity"]["overview"], "MCP経由の活動記録")
         snapshot = self.client.call("memory_snapshot", {})
-        self.assertNotIn("テスト実行", snapshot["context_text"])
+        self.assertNotIn("MCP経由の活動記録", snapshot["context_text"])
 
     def test_key_tools_never_return_values(self) -> None:
         self.initialise()

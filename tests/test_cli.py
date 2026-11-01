@@ -181,6 +181,27 @@ class CLITests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(json.loads(out)["status"], "cancelled")
 
+    def test_activity_summary_requires_structured_json(self) -> None:
+        self.cli("init")
+        payload = json.dumps(
+            {
+                "date": "2026-11-01",
+                "overview": "CLIからの活動記録",
+                "achievements": ["記録"],
+                "decisions": [],
+                "remaining": [],
+            },
+            ensure_ascii=False,
+        )
+        code, out, err = self.cli(
+            "rag", "remember", "【活動記録】CLI", "--kind", "activity_summary", "--activity-json", payload
+        )
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["status"], "adopted")
+        code, _, err = self.cli("rag", "remember", "活動", "--kind", "activity_summary")
+        self.assertNotEqual(code, 0)
+        self.assertIn("activity", err)
+
     @unittest.skipUnless(os.name == "nt", "Windows launchers are verified on Windows")
     def test_launchers_exist_and_run(self) -> None:
         env = os.environ.copy()

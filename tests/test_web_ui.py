@@ -46,9 +46,10 @@ class MemoryBrowserTests(unittest.TestCase):
         self.assertIn("text/html", headers.get("Content-Type", ""))
         self.assertIn("default-src 'none'", headers.get("Content-Security-Policy", ""))
         text = body.decode("utf-8")
-        self.assertIn("ultra-RAG memory", text)
+        self.assertIn("記憶台帳", text)
         self.assertIn("navigator.clipboard", text)
-        self.assertIn("word-break", text)
+        self.assertIn("活動記録", text)
+        self.assertIn("overflow-wrap", text)
         self.assertNotIn("http://", text)
         self.assertNotIn("https://", text)
         self.assertNotIn("<script src=", text)
@@ -103,6 +104,25 @@ class MemoryBrowserTests(unittest.TestCase):
         _, headers, raw = self.fetch("/ui/data")
         data = json.loads(raw.decode("utf-8"))
         self.assertEqual(data["counts"]["candidates"], 0)
+
+    def test_activity_summary_is_visible_in_its_own_view(self) -> None:
+        activity = self.service.remember(
+            "【活動記録】UI確認",
+            kind="activity_summary",
+            activity={
+                "date": "2026-11-01",
+                "overview": "UI確認をした",
+                "achievements": ["活動タブを追加"],
+                "decisions": [],
+                "remaining": ["ページング"],
+            },
+            adoption="activity_summary",
+        )
+        _, _, raw = self.fetch("/ui/data")
+        data = json.loads(raw.decode("utf-8"))
+        self.assertEqual(data["counts"]["activities"], 1)
+        self.assertEqual(data["activities"][0]["id"], activity.memory_id)
+        self.assertEqual(data["activities"][0]["activity"]["remaining"], ["ページング"])
 
     @unittest.skipUnless(shutil.which("node"), "node is required to syntax-check the inline script")
     def test_inline_script_parses(self) -> None:

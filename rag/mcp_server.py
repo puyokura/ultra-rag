@@ -41,13 +41,24 @@ def build_server(layout: Layout) -> FastMCP:
     mcp = FastMCP("ultra-rag-memory", instructions=INSTRUCTIONS, log_level="ERROR")
 
     @mcp.tool()
-    def memory_snapshot(project_id: str = "", query: str = "", session_id: str = "", related_limit: int = 8) -> dict[str, Any]:
-        """Return the confirmed profile, applicable constraints, related memories, candidates, and update notices."""
+    def memory_snapshot(
+        project_id: str = "",
+        query: str = "",
+        session_id: str = "",
+        related_limit: int = 8,
+        include_lessons: bool = False,
+        include_related: bool = False,
+        include_pending: bool = False,
+    ) -> dict[str, Any]:
+        """Return the core profile and constraints; lessons, related memories, and candidate bodies are opt-in."""
         return service.snapshot(
             project_id=project_id or None,
             query=query,
             session_id=session_id or None,
             related_limit=max(1, min(int(related_limit), 50)),
+            include_lessons=include_lessons,
+            include_related=include_related,
+            include_pending=include_pending,
         )
 
     @mcp.tool()
@@ -109,6 +120,7 @@ def build_server(layout: Layout) -> FastMCP:
         exceptions: list[str] | None = None,
         session_id: str = "",
         source_refs: list[dict[str, Any]] | None = None,
+        activity: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Propose a policy or preference; only activity summaries are adopted without confirmation."""
         is_activity = kind == "activity_summary"
@@ -122,6 +134,7 @@ def build_server(layout: Layout) -> FastMCP:
             evidence_kind="explicit_statement" if is_activity else "extracted",
             session_id=session_id or None,
             source_refs=source_refs,
+            activity=activity,
             adoption="activity_summary" if is_activity else None,
         ).to_dict()
 
@@ -134,6 +147,7 @@ def build_server(layout: Layout) -> FastMCP:
         target_revision: int | None = None,
         session_id: str = "",
         source_refs: list[dict[str, Any]] | None = None,
+        activity: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Propose a revision; an adopted memory changes only after owner confirmation."""
         return service.update(
@@ -144,6 +158,7 @@ def build_server(layout: Layout) -> FastMCP:
             target_revision=target_revision,
             session_id=session_id or None,
             source_refs=source_refs,
+            activity=activity,
             evidence_kind="extracted",
             adoption=None,
         ).to_dict()

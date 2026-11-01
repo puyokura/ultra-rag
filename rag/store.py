@@ -56,6 +56,16 @@ MEMORY_FILE_RE = re.compile(r"^mem_[0-9a-f]{32}\.md$")
 SESSION_FILE_RE = re.compile(r"^sess_[0-9a-zA-Z._-]+\.md$|^[0-9a-zA-Z._-]+\.md$")
 
 
+def _redact_activity(activity: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not activity:
+        return activity
+    cleaned = dict(activity)
+    cleaned["overview"] = redact_text(str(cleaned.get("overview") or ""))[0]
+    for key in ("achievements", "decisions", "remaining"):
+        cleaned[key] = [redact_text(str(item))[0] for item in cleaned.get(key, [])]
+    return cleaned
+
+
 class StoreError(RuntimeError):
     pass
 
@@ -590,6 +600,7 @@ class MemoryStore:
             effective_at=utc_now(),
             conditions=conditions,
             exceptions=exceptions,
+            activity=_redact_activity(copy.deepcopy(proposal.activity)),
             origin="conversation",
             note_method=None,
             owner_session_id=proposal.session_id if (proposal.scope == "session") else None,
@@ -693,6 +704,7 @@ class MemoryStore:
             effective_at=utc_now(),
             conditions=[redact_text(item)[0] for item in proposal.conditions] if proposal.conditions is not None else list(target.conditions),
             exceptions=[redact_text(item)[0] for item in proposal.exceptions] if proposal.exceptions is not None else list(target.exceptions),
+            activity=_redact_activity(proposal.activity) if proposal.activity is not None else copy.deepcopy(target.activity),
             supersedes=target.id,
             origin="conversation",
             note_method=None,

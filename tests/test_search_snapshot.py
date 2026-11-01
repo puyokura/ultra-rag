@@ -123,11 +123,80 @@ class SnapshotTests(unittest.TestCase):
 
     def test_pending_candidates_are_visible_as_confirmation_material_only(self) -> None:
         pending = self.service.remember("確認待ちの候補", evidence_kind="extracted")
-        snapshot = self.service.snapshot()
+        snapshot = self.service.snapshot(include_pending=True)
         self.assertNotIn("確認待ちの候補", snapshot["profile"])
         self.assertNotIn("確認待ちの候補", snapshot["constraints"])
         self.assertIn("確認待ちの候補", snapshot["context_text"])
         self.assertTrue(any(item["id"] == pending.memory_id for item in snapshot["pending"]))
+
+
+class SearchScopeTests(unittest.TestCase):
+    """#36: unadopted memories and excerpts are searchable, never injected."""
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.layout = new_layout(Path(self.temp.name))
+        self.service = RagService(self.layout)
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def test_activity_summary_is_searchable_but_not_injected(self) -> None:
+        activity = self.service.remember(
+            "固有の活動記録キーワードを残した",
+            kind="activity_summary",
+            activity={
+                "date": "2026-11-01",
+                "overview": "検索対象の確認",
+                "achievements": ["検索を広げた"],
+                "decisions": [],
+                "remaining": [],
+            },
+            adoption="activity_summary",
+        )
+        self.assertEqual(activity.status, "adopted")
+        hits = self.service.search("固有の活動記録キーワード")
+        self.assertTrue(any(hit["memory_id"] == activity.memory_id for hit in hits))
+        snapshot = self.service.snapshot(query="固有の活動記録キーワード")
+        self.assertNotIn("固有の活動記録キーワード", snapshot["context_text"])
+
+    def record_excerpt(self, session_id: str, text: str) -> None:
+        self.service.record_turn(
+            session_id=session_id,
+            project_id=None,
+            turn=1,
+            user_text=text,
+            assistant_text="了解しました。",
+            user_message_id=f"{session_id}-u1",
+            assistant_message_id=f"{session_id}-a1",
+            excerpts=[
+                {"role": "user", "message_id": f"{session_id}-u1", "start": 0, "end": len(text), "text": text}
+            ],
+        )
+
+    def test_excerpt_is_searchable_only_in_its_own_session(self) -> None:
+        self.record_excerpt("sess_scope_a", "固有の抜粋キーワードを含む本文です。")
+        hits = self.service.search("固有の抜粋キーワード", session_id="sess_scope_a")
+        self.assertTrue(any(hit.get("hit_type") == "excerpt" for hit in hits))
+        other = self.service.search("固有の抜粋キーワード", session_id="sess_scope_b")
+        self.assertEqual(other, [])
+        snapshot = self.service.snapshot(session_id="sess_scope_a")
+        self.assertNotIn("固有の抜粋キーワード", snapshot["context_text"])
+
+    def test_excerpt_is_excluded_when_scopes_excludes_session(self) -> None:
+        self.record_excerpt("sess_scope_c", "範囲指定で除外する抜粋キーワード。")
+        hits = self.service.search("範囲指定で除外する抜粋キーワード", scopes=["personal"], session_id="sess_scope_c")
+        self.assertFalse(any(hit.get("hit_type") == "excerpt" for hit in hits))
+
+    def test_deleted_source_excerpt_is_not_searchable(self) -> None:
+        self.record_excerpt("sess_scope_d", "削除対象の抜粋キーワード。")
+        memory = self.service.remember(
+            "削除対象の記憶",
+            source_refs=[{"session_id": "sess_scope_d", "message_id": "sess_scope_d-u1", "start": 0, "end": 10}],
+        )
+        self.service.delete(memory.memory_id, confirm=True)
+        hits = self.service.search("削除対象の抜粋キーワード", session_id="sess_scope_d")
+        self.assertFalse(any(hit.get("hit_type") == "excerpt" for hit in hits))
 
 
 if __name__ == "__main__":
