@@ -21,7 +21,7 @@ from contracts.util import (
     write_json,
     write_lock,
 )
-from rag.profile import applicable_constraints, render_constraints
+from rag.profile import applicable_constraints, render_constraints, render_profile
 from rag.search import SearchIndex
 from rag.store import MemoryStore
 
@@ -75,7 +75,9 @@ class RagService:
             check_identifier(session_id, "session_id")
         related_limit = max(1, min(int(related_limit), 50))
         state = self.store.load()
-        profile_text = (state.directory / "profile" / "current.md").read_text(encoding="utf-8")
+        # The profile is composed from the adopted records on every request;
+        # the Markdown file is an artifact, never an injection source.
+        profile_text = render_profile(list(state.memories.values()), state.revision)
         constraints = applicable_constraints(list(state.memories.values()), project_id)
         constraints_text = render_constraints(constraints, state.revision)
         related = self.index.search(query, project_id, limit=related_limit) if query.strip() else []

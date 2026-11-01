@@ -101,7 +101,7 @@ sessionHandler(session, {
     id: 'msg-user-2c',
     role: 'user',
     source: { kind: 'user' },
-    content: [{ type: 'text', text: '以後、必ず実測することを覚えて。' }],
+    content: [{ type: 'text', text: '以後、必ず実測することを覚えておいて。' }],
   },
 })
 sessionHandler(session, {

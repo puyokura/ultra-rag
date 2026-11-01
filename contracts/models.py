@@ -23,6 +23,7 @@ MEMORY_KINDS = (
     "requirement",
     "lesson",
     "project_decision",
+    "activity_summary",
 )
 MEMORY_SCOPES = ("personal", "shared_lesson", "project", "session")
 MEMORY_STATUSES = ("adopted", "pending", "conflict", "superseded", "forgotten", "deleted", "rejected")
@@ -34,7 +35,7 @@ EVIDENCE_KINDS = (
     "imported_statement",
     "extracted",
 )
-ADOPTION_KINDS = ("owner_operation", "user_message")
+ADOPTION_KINDS = ("owner_operation", "user_message", "activity_summary")
 KIND_SCOPE_RULES = {"project_decision": ("project",)}
 PROPOSAL_OPS = ("create", "update", "forget", "delete", "confirm")
 PROPOSAL_STATUSES = (

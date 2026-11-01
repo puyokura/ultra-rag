@@ -487,6 +487,10 @@ class MemoryStore:
         """
         if proposal.adoption == "owner_operation":
             return True
+        if proposal.adoption == "activity_summary":
+            # The owner explicitly allows activity records to be saved without
+            # confirmation. The record is excluded from profile injection.
+            return proposal.kind == "activity_summary"
         if proposal.adoption != "user_message":
             return False
         data = proposal.attestation or {}
@@ -589,6 +593,7 @@ class MemoryStore:
             origin="conversation",
             note_method=None,
             owner_session_id=proposal.session_id if (proposal.scope == "session") else None,
+            autoload=False if (proposal.kind == "activity_summary") else True,
         ).validate()
         memories[record.id] = record
         message = "adopted" if adopted else "stored as a confirmation candidate"

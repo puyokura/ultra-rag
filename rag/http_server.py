@@ -131,6 +131,22 @@ class RagHttpServer:
                             raise ApiError(403, "the memory browser is available on the local network only")
                         self._send(200, build_view(server.service))
                         return
+                    if method == "POST" and parsed.path == "/ui/decide":
+                        if not self._lan_only():
+                            raise ApiError(403, "the memory browser is available on the local network only")
+                        # A custom header makes cross-site form posts useless:
+                        # browsers preflight it and this server answers no CORS.
+                        if self.headers.get("X-Ultra-RAG-UI") != "1":
+                            raise ApiError(403, "missing UI request header")
+                        payload = self._read_json()
+                        candidate = str(payload.get("candidate_id") or "")
+                        decision = str(payload.get("decision") or "adopt")
+                        if not candidate:
+                            raise ApiError(400, "candidate_id is required")
+                        if decision not in ("adopt", "reject"):
+                            raise ApiError(400, "decision must be adopt or reject")
+                        self._send(200, server.service.confirm(candidate, decision=decision).to_dict())
+                        return
                     if not self._authorized():
                         raise ApiError(401, "missing or invalid bearer token")
                     routes = {

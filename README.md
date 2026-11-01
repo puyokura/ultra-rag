@@ -14,11 +14,11 @@ ultra-RAG keeps reusable knowledge, session excerpts, encrypted API keys, and pa
 - **Password handoff** 窶・one-shot sudo/SSH password input without writing the password to disk.
 - **MCP server** 窶・exposes memory and key tools to dsh over stdio. Memory writes are proposals: `memory_remember` / `memory_update` create confirmation candidates unless the host observed the user's own request, and `memory_forget` / `memory_delete` return confirmation requests for the owner.
 - **Optional server sync** 窶・a home server can be authoritative, while a PC keeps a replica and an unsynced queue.
-- **Read-only memory browser** 窶・the HTTP service serves `/ui`, a single self-contained page for browsing memories, candidates, and the profile. It is read-only and has no write path.
+- **Memory browser** 窶・the HTTP service serves `/ui`, a single self-contained page for browsing memories, candidates, and the profile. Pending candidates can be adopted or rejected from the page.
 
 The public build does **not** include a hosted service, telemetry, or a shared cloud database. Your data stays in your local application-data directory unless you explicitly configure sync.
 
-`/ui` is intentionally unauthenticated. Bind the HTTP service to a trusted LAN address only and do not expose it to the internet. The `/v1` API still requires the bearer token.
+`/ui` is intentionally unauthenticated. Browsing and candidate decisions work from the page; there is no memory-body editing. Bind the HTTP service to a trusted LAN address only and do not expose it to the internet. The `/v1` API still requires the bearer token.
 
 ## Single-PC mode
 

@@ -22,9 +22,10 @@ from rag.redaction import redact_text
 from rag.service import RagService
 from rag.store import StoreError
 
-MEMORY_REQUEST_RE = re.compile(
-    r"(?:覚えて|記憶して)(?:おいて|おき|ください|下さい|ほしい|くれ|ね|もらえ|$|[。．.!！、,])"
-)
+# Only the explicit "keep this" form is adopted automatically. Every other
+# memory-shaped sentence becomes a confirmation candidate.
+ADOPT_REQUEST_RE = re.compile(r"(?:覚えておいて|覚えておき|記憶しておいて|記憶しておき)")
+CANDIDATE_REQUEST_RE = re.compile(r"(?:覚えて|記憶して)")
 QUOTED_SPAN_RE = re.compile(r"「[^」]*」|『[^』]*』|\"[^\"]*\"|“[^”]*”")
 NEGATION_RE = re.compile(
     r"(?:覚え|記憶)[^。．\n]{0,14}(?:ない|なく|ません|ないで|不要|ほしくない|必要(?:は)?ない)"
@@ -55,11 +56,15 @@ def _is_memory_request(paragraph: str) -> str | None:
     """
     spans = _quoted_spans(paragraph)
     outside = _outside_quotes(paragraph, spans)
-    if not MEMORY_REQUEST_RE.search(outside):
+    if not CANDIDATE_REQUEST_RE.search(outside):
         return None
     if NEGATION_RE.search(paragraph):
         return None
     if "?" in paragraph or "？" in paragraph:
+        # A question about memory is not a registration request; a question
+        # that carries "覚えておいて" is ambiguous and waits for confirmation.
+        return "ambiguous" if ADOPT_REQUEST_RE.search(outside) else None
+    if not ADOPT_REQUEST_RE.search(outside):
         return "ambiguous"
     if ("今回は" in paragraph or "今回だけ" in paragraph) and not DURABLE_RE.search(paragraph):
         return None
@@ -80,10 +85,9 @@ def _explicit_registrations(
 ) -> list[dict[str, Any]]:
     """Paragraphs the user asked to remember, classified from the text itself.
 
-    Only a marker outside quotation marks counts. The caller attaches a host
-    attestation (message, range, statement digest) for an instruction; an
-    ambiguous paragraph becomes a confirmation candidate instead of an adopted
-    policy.
+    Only a marker outside quotation marks counts. "覚えておいて" is adopted with
+    a host attestation; other memory-shaped sentences ("覚えて", "記憶して")
+    become confirmation candidates.
     """
     registrations: list[dict[str, Any]] = []
     for start, end, paragraph in split_paragraphs(user_text):

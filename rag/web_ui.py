@@ -85,7 +85,7 @@ a { color: var(--accent); }
 </div>
 <p class="count" id="count"></p>
 <div id="panel"></div>
-<footer>読み取り専用。このページは同じLAN内の端末から認証なしで閲覧できる。外部公開しない。表示はすべて原文で、省略しない。</footer>
+<footer>閲覧は読み取り専用。候補の承認・却下だけは書き込みできる（LAN内・認証なし）。外部公開しない。表示はすべて原文で、省略しない。</footer>
 </div>
 <div class="toast" id="toast"></div>
 <script>
@@ -202,6 +202,37 @@ function memoryRow(record) {
   tr.appendChild(cell("rev " + record.revision + "\\n" + (record.recorded_at || ""), "sub"));
   return tr;
 }
+async function decide(memoryId, decision) {
+  const label = decision === "adopt" ? "承認" : "却下";
+  if (!window.confirm(label + "します。\n" + memoryId)) return;
+  try {
+    const response = await fetch("/ui/decide", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Ultra-RAG-UI": "1" },
+      body: JSON.stringify({ candidate_id: memoryId, decision: decision }),
+    });
+    if (!response.ok) throw new Error("HTTP " + response.status);
+    toast(label + "しました");
+    await load();
+  } catch (error) {
+    toast(label + "できません（" + error.message + "）");
+  }
+}
+function candidateRow(record) {
+  const tr = memoryRow(record);
+  const actions = document.createElement("td");
+  for (const [label, decision] of [["承認", "adopt"], ["却下", "reject"]]) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "copy";
+    button.textContent = label;
+    button.addEventListener("click", () => decide(record.id, decision));
+    actions.appendChild(button);
+    actions.appendChild(document.createTextNode(" "));
+  }
+  tr.appendChild(actions);
+  return tr;
+}
 function render() {
   const data = state.data;
   if (!data) return;
@@ -209,7 +240,10 @@ function render() {
     const source = state.tab === "candidates" ? data.candidates : data.memories;
     const records = source.filter(matches);
     el("count").textContent = records.length + " 件を表示 / " + source.length + " 件";
-    renderTable(records, ["ID", "状態・種別・範囲", "内容", "改訂・記録日"], memoryRow);
+    const columns = state.tab === "candidates"
+      ? ["ID", "状態・種別・範囲", "内容", "改訂・記録日", "操作"]
+      : ["ID", "状態・種別・範囲", "内容", "改訂・記録日"];
+    renderTable(records, columns, state.tab === "candidates" ? candidateRow : memoryRow);
     return;
   }
   const panel = el("panel");

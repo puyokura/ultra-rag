@@ -110,7 +110,8 @@ def build_server(layout: Layout) -> FastMCP:
         session_id: str = "",
         source_refs: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        """Propose a policy or preference; the record waits for owner confirmation unless the hook observed the user's own statement."""
+        """Propose a policy or preference; only activity summaries are adopted without confirmation."""
+        is_activity = kind == "activity_summary"
         return service.remember(
             statement=statement,
             kind=kind,
@@ -118,10 +119,10 @@ def build_server(layout: Layout) -> FastMCP:
             project_id=project_id or None,
             conditions=conditions,
             exceptions=exceptions,
-            evidence_kind="extracted",
+            evidence_kind="explicit_statement" if is_activity else "extracted",
             session_id=session_id or None,
             source_refs=source_refs,
-            adoption=None,
+            adoption="activity_summary" if is_activity else None,
         ).to_dict()
 
     @mcp.tool()

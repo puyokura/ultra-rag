@@ -148,7 +148,7 @@ class ForgetSuppressionTests(unittest.TestCase):
             "cwd": str(Path(self.temp.name)),
             "session_id": "sess_forget_0001",
             "turn": 1,
-            "user_text": "以後、必ず実測することを覚えて。",
+            "user_text": "以後、必ず実測することを覚えておいて。",
             "assistant_text": "了解しました。",
             "user_message_id": "msg-forget-1",
             "assistant_message_id": "msg-forget-2",
@@ -166,7 +166,7 @@ class ForgetSuppressionTests(unittest.TestCase):
         adopted = [
             record
             for record in self.service.store.load().memories.values()
-            if record.statement == "以後、必ず実測することを覚えて。" and record.status == "adopted"
+            if record.statement == "以後、必ず実測することを覚えておいて。" and record.status == "adopted"
         ]
         self.assertEqual(adopted, [])
 
@@ -343,6 +343,65 @@ class OperationLedgerTests(unittest.TestCase):
         merged = self.service.remember("同一の方針", kind="preference")
         self.assertEqual(merged.status, "merged")
         self.assertEqual(self.service.status(merged.update_id)["status"], "merged")
+
+
+class ActivitySummaryTests(unittest.TestCase):
+    """Activity records are saved without confirmation and never injected."""
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.layout = new_layout(Path(self.temp.name))
+        self.service = RagService(self.layout)
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def test_activity_summary_is_adopted_and_not_injected(self) -> None:
+        result = self.service.remember(
+            "【活動記録】今日はUIを追加した。",
+            kind="activity_summary",
+            adoption="activity_summary",
+        )
+        self.assertEqual(result.status, "adopted")
+        stored = self.service.get_memory(result.memory_id)
+        self.assertFalse(stored["autoload"])
+        snapshot = self.service.snapshot()
+        self.assertNotIn("今日はUIを追加した", snapshot["profile"])
+        self.assertNotIn("今日はUIを追加した", snapshot["constraints"])
+        self.assertEqual(self.service.search("UIを追加"), [])
+
+    def test_activity_claim_does_not_adopt_other_kinds(self) -> None:
+        result = self.service.remember(
+            "通常の方針", kind="preference", adoption="activity_summary"
+        )
+        self.assertNotEqual(result.status, "adopted")
+
+
+class ProfileCompositionTests(unittest.TestCase):
+    """The injected profile is composed from records, not from a Markdown file."""
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.layout = new_layout(Path(self.temp.name))
+        self.service = RagService(self.layout)
+        self.created = self.service.remember("記録から描画する方針", kind="design_principle")
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def test_snapshot_never_reads_the_rendered_markdown_artifact(self) -> None:
+        from unittest import mock
+
+        original = Path.read_text
+
+        def guarded(path, *args, **kwargs):
+            if path.name == "current.md" and path.parent.name == "profile":
+                raise AssertionError("the profile artifact must not be an injection source")
+            return original(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "read_text", guarded):
+            snapshot = self.service.snapshot()
+        self.assertIn("記録から描画する方針", snapshot["profile"])
 
 
 if __name__ == "__main__":

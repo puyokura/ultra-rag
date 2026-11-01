@@ -88,11 +88,11 @@ class HookRegistrationTests(unittest.TestCase):
         self.assertEqual(self.register(text)["registrations"], [])
 
     def test_quoted_policy_alone_is_not_registered(self) -> None:
-        text = "「以後、必ず実測することを覚えて。」という例文を引用します。"
+        text = "「以後、必ず実測することを覚えておいて。」という例文を引用します。"
         self.assertEqual(self.register(text)["registrations"], [])
 
     def test_durable_policy_inside_temporary_context_is_registered(self) -> None:
-        result = self.register("今回はこの案件だけど、以後、必ず実測することを覚えて。")
+        result = self.register("今回はこの案件だけど、以後、必ず実測することを覚えておいて。")
         self.assertEqual(len(result["registrations"]), 1)
         self.assertEqual(result["registrations"][0]["status"], "adopted")
 
@@ -113,7 +113,7 @@ class SourceResolutionTests(unittest.TestCase):
             "cwd": str(Path(self.temp.name)),
             "session_id": "sess_source_0001",
             "turn": 1,
-            "user_text": "以後、必ず実測することを覚えて。",
+            "user_text": "以後、必ず実測することを覚えておいて。",
             "assistant_text": "了解しました。",
             "user_message_id": "msg-source-1",
             "assistant_message_id": "msg-source-a1",
@@ -147,7 +147,7 @@ class SourceResolutionTests(unittest.TestCase):
     def test_unknown_excerpt_id_reports_no_evidence(self) -> None:
         updated = self.service.update(
             self.memory_id,
-            statement="以後、必ず実測することを覚えて。",
+            statement="以後、必ず実測することを覚えておいて。",
             source_refs=[
                 {
                     "session_id": self.session.id,
