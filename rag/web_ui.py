@@ -204,7 +204,7 @@ function memoryRow(record) {
 }
 async function decide(memoryId, decision) {
   const label = decision === "adopt" ? "承認" : "却下";
-  if (!window.confirm(label + "します。\n" + memoryId)) return;
+  if (!window.confirm(label + "します。 " + memoryId)) return;
   try {
     const response = await fetch("/ui/decide", {
       method: "POST",

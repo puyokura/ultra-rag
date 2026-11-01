@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
 import tempfile
 import unittest
 import urllib.error
@@ -101,6 +103,20 @@ class MemoryBrowserTests(unittest.TestCase):
         _, headers, raw = self.fetch("/ui/data")
         data = json.loads(raw.decode("utf-8"))
         self.assertEqual(data["counts"]["candidates"], 0)
+
+    @unittest.skipUnless(shutil.which("node"), "node is required to syntax-check the inline script")
+    def test_inline_script_parses(self) -> None:
+        _, _, body = self.fetch("/ui")
+        text = body.decode("utf-8")
+        script = text.split("<script>", 1)[1].split("</script>", 1)[0]
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False, encoding="utf-8") as handle:
+            handle.write(script)
+            path = handle.name
+        try:
+            result = subprocess.run(["node", "--check", path], capture_output=True, text=True)
+        finally:
+            Path(path).unlink(missing_ok=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_api_still_requires_the_bearer_token(self) -> None:
         status, _, _ = self.fetch("/v1/revision")
